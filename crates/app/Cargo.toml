@@ -9,3 +9,6 @@ rust-version.workspace = true
 config-store = { path = "../config-store" }
 gpui-kit = "=0.6.6"
 tunnel-domain = { path = "../tunnel-domain" }
+tunnel-core = { path = "../tunnel-core" }
+tokio.workspace = true
+zeroize.workspace = true

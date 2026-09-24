@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use config_store::{ConfigStoreError, DomainConfig};
 use gpui_kit::base::{Disableable, Selectable, StyledExt};
@@ -7,7 +10,11 @@ use gpui_kit::component::{
     button::{Button, ButtonVariants},
     scroll::ScrollableElement,
 };
-use gpui_kit::{Context, IntoElement, ParentElement as _, Render, Styled as _, Window, div, rems};
+use gpui_kit::{
+    AsyncApp, Context, IntoElement, ParentElement as _, Render, Styled as _, Task, Window, div,
+    rems,
+};
+use tunnel_core::{CoreCommand, ManagerHandle, ManagerSnapshot, SupervisorState};
 use tunnel_domain::TunnelMode;
 
 const PAGE_SIZE: usize = 25;
@@ -37,19 +44,63 @@ pub struct Workspace {
     page: Page,
     page_index: usize,
     startup: Result<(PathBuf, DomainConfig), String>,
+    manager: Option<ManagerHandle>,
+    snapshot: Arc<ManagerSnapshot>,
+    command_error: Option<String>,
+    runtime_error: Option<String>,
+    _updates: Option<Task<()>>,
 }
 
 impl Workspace {
     pub fn new(
         startup: Result<(PathBuf, DomainConfig), ConfigStoreError>,
+        manager: Option<ManagerHandle>,
+        runtime_error: Option<String>,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> Self {
+        let (snapshot, updates) = match &manager {
+            Some(manager) => {
+                let mut state = manager.subscribe();
+                let snapshot = Arc::clone(&state.borrow_and_update());
+                let updates = cx.spawn(async move |this, cx: &mut AsyncApp| {
+                    while state.changed().await.is_ok() {
+                        let latest = Arc::clone(&state.borrow_and_update());
+                        if this
+                            .update(cx, |view, cx| {
+                                view.snapshot = latest;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                (snapshot, Some(updates))
+            }
+            None => (Arc::new(ManagerSnapshot::new()), None),
+        };
         Self {
             page: Page::Overview,
             page_index: 0,
             startup: startup.map_err(|error| error.to_string()),
+            manager,
+            snapshot,
+            command_error: None,
+            runtime_error,
+            _updates: updates,
         }
+    }
+
+    fn request(&mut self, command: CoreCommand, cx: &mut Context<Self>) {
+        self.command_error = self.manager.as_ref().and_then(|manager| {
+            manager
+                .try_send(command)
+                .err()
+                .map(|error| error.to_string())
+        });
+        cx.notify();
     }
 
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
@@ -126,7 +177,26 @@ impl Workspace {
                 .child(format!("Could not load configuration: {error}"))
                 .into_any_element(),
         };
-        content.child(div().flex_1().min_h_0().overflow_y_scrollbar().child(body))
+        let content = content.child(div().flex_1().min_h_0().overflow_y_scrollbar().child(body));
+        if let Some(error) = &self.command_error {
+            content.child(
+                div()
+                    .px_6()
+                    .py_2()
+                    .text_color(cx.theme().danger)
+                    .child(error.clone()),
+            )
+        } else if let Some(error) = &self.runtime_error {
+            content.child(
+                div()
+                    .px_6()
+                    .py_2()
+                    .text_color(cx.theme().danger)
+                    .child(format!("Could not start tunnel runtime: {error}")),
+            )
+        } else {
+            content
+        }
     }
 
     fn render_page(
@@ -136,18 +206,38 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         match self.page {
-            Page::Overview => div()
-                .p_6()
-                .gap_4()
-                .flex()
-                .flex_col()
-                .child(format!(
-                    "{} tunnels · {} jumpers",
-                    config.tunnels.len(),
-                    config.hosts.len()
-                ))
-                .child("Open Tunnels to inspect your saved connections.")
-                .into_any_element(),
+            Page::Overview => {
+                let healthy = self
+                    .snapshot
+                    .values()
+                    .filter(|view| matches!(view.state, SupervisorState::Healthy { .. }))
+                    .count();
+                let reconnecting = self
+                    .snapshot
+                    .values()
+                    .filter(|view| matches!(view.state, SupervisorState::Reconnecting { .. }))
+                    .count();
+                let blocked = self
+                    .snapshot
+                    .values()
+                    .filter(|view| matches!(view.state, SupervisorState::Blocked { .. }))
+                    .count();
+                div()
+                    .p_6()
+                    .gap_4()
+                    .flex()
+                    .flex_col()
+                    .child(format!(
+                        "{healthy} Healthy  ·  {reconnecting} Reconnecting  ·  {blocked} Blocked"
+                    ))
+                    .child(format!(
+                        "{} saved tunnels · {} jumpers",
+                        config.tunnels.len(),
+                        config.hosts.len()
+                    ))
+                    .child("Open Tunnels to start or inspect a connection.")
+                    .into_any_element()
+            }
             Page::Jumpers => self.render_hosts(config, cx).into_any_element(),
             Page::Tunnels => self.render_tunnels(config, cx).into_any_element(),
             Page::Logs => div()
@@ -202,17 +292,45 @@ impl Workspace {
                 TunnelMode::Remote => "Remote",
                 TunnelMode::Dynamic => "SOCKS5",
             };
+            let state = self
+                .snapshot
+                .get(&tunnel.id)
+                .map(|view| &view.state)
+                .unwrap_or(&SupervisorState::Stopped);
+            let label = state_label(state);
+            let id = tunnel.id.clone();
+            let (button_label, command) = match state {
+                SupervisorState::Stopped => ("Start", CoreCommand::StartTunnel(id.clone())),
+                SupervisorState::Blocked { .. } => {
+                    ("Retry", CoreCommand::RestartTunnel(id.clone()))
+                }
+                _ => ("Stop", CoreCommand::StopTunnel(id.clone())),
+            };
+            let action = Button::new(format!("{}-action", id.0))
+                .label(button_label)
+                .disabled(self.manager.is_none())
+                .on_click(cx.listener(move |this, _, _, cx| this.request(command.clone(), cx)));
             rows = rows.child(
                 div()
+                    .flex()
+                    .items_center()
+                    .justify_between()
                     .px_3()
                     .py_2()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(tunnel.name.clone())
-                    .child(format!(
-                        "{mode} · {}:{} · Stopped",
-                        tunnel.local.host, tunnel.local.port
-                    )),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(tunnel.name.clone())
+                            .child(format!(
+                                "{mode} · {}:{} · {label}",
+                                tunnel.local.host, tunnel.local.port
+                            )),
+                    )
+                    .child(action),
             );
         }
         div()
@@ -259,6 +377,16 @@ impl Workspace {
                         cx.notify();
                     })),
             )
+    }
+}
+
+fn state_label(state: &SupervisorState) -> &'static str {
+    match state {
+        SupervisorState::Connecting { .. } => "Connecting",
+        SupervisorState::Reconnecting { .. } => "Reconnecting",
+        SupervisorState::Healthy { .. } => "Healthy",
+        SupervisorState::Blocked { .. } => "Blocked",
+        SupervisorState::Stopped => "Stopped",
     }
 }
 

@@ -2,6 +2,7 @@
 //! separate runtime, which must execute the effects returned by this model.
 
 mod local_forward;
+mod manager;
 mod remote_forward;
 mod remote_supervisor;
 mod retry;
@@ -10,6 +11,10 @@ mod state_machine;
 mod supervisor;
 
 pub use local_forward::{LocalForwardError, LocalForwardWorker};
+pub use manager::{
+    CoreCommand, CredentialSource, ManagerError, ManagerHandle, ManagerSnapshot, TunnelManager,
+    TunnelView,
+};
 pub use remote_forward::{RemoteForwardError, RemoteForwardWorker};
 pub use remote_supervisor::RemoteForwardSupervisor;
 pub use retry::RetrySchedule;

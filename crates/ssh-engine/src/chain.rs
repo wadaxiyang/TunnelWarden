@@ -28,8 +28,10 @@ pub enum SshChainError {
     Hop {
         hop: usize,
         #[source]
-        source: SshConnectError,
+        source: Box<SshConnectError>,
     },
+    #[error("credential for SSH hop {hop} unavailable: {reason}")]
+    Credential { hop: usize, reason: String },
 }
 
 /// Owns every SSH session in order. A later hop's transport is an SSH channel
@@ -74,7 +76,10 @@ impl SshChain {
             first_remote,
         )
         .await
-        .map_err(|source| SshChainError::Hop { hop: 1, source })?;
+        .map_err(|source| SshChainError::Hop {
+            hop: 1,
+            source: Box::new(source),
+        })?;
         sessions.push(session);
 
         for (index, hop) in remaining.enumerate() {
@@ -98,7 +103,7 @@ impl SshChain {
                     disconnect_all(&mut sessions).await;
                     return Err(SshChainError::Hop {
                         hop: index + 2,
-                        source,
+                        source: Box::new(source),
                     });
                 }
             };
@@ -122,7 +127,7 @@ impl SshChain {
                     disconnect_all(&mut sessions).await;
                     return Err(SshChainError::Hop {
                         hop: index + 2,
-                        source,
+                        source: Box::new(source),
                     });
                 }
             }
@@ -150,7 +155,7 @@ impl SshChain {
                 .await
                 .map_err(|source| SshChainError::Hop {
                     hop: index + 1,
-                    source,
+                    source: Box::new(source),
                 })?;
             rtts.push(rtt);
         }

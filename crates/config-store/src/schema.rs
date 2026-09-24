@@ -134,6 +134,7 @@ impl Default for ConfigDocument {
     }
 }
 
+#[derive(Clone)]
 pub struct DomainConfig {
     pub app: AppSettings,
     pub hosts: Vec<SshHost>,

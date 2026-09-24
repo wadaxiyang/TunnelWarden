@@ -298,7 +298,9 @@ impl LocalForwardSupervisor {
 
 pub(crate) fn chain_retryability(error: &SshChainError) -> Retryability {
     match error {
-        SshChainError::Empty | SshChainError::TooManyHops => Retryability::Blocked,
+        SshChainError::Empty | SshChainError::TooManyHops | SshChainError::Credential { .. } => {
+            Retryability::Blocked
+        }
         SshChainError::Hop { source, .. } => source.summary().retryability,
     }
 }

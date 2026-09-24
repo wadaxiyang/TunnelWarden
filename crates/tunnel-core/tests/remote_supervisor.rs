@@ -153,7 +153,10 @@ async fn remote_registration_recovers_after_disconnect_and_stop_cancels_it() {
                     )
                     .await
                     .map(SshChain::single)
-                    .map_err(|source| ssh_engine::SshChainError::Hop { hop: 1, source })
+                    .map_err(|source| ssh_engine::SshChainError::Hop {
+                        hop: 1,
+                        source: Box::new(source),
+                    })
                 }
             })
             .await;
