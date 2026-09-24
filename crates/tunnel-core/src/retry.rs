@@ -31,6 +31,10 @@ impl RetrySchedule {
     pub fn should_reset(&self, healthy_for: Duration) -> bool {
         healthy_for >= self.policy.reset_after_healthy
     }
+
+    pub fn jitter_limit(&self) -> i8 {
+        self.policy.jitter_percent.min(100) as i8
+    }
 }
 
 #[cfg(test)]

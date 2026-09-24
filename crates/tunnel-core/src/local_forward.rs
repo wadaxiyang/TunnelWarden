@@ -1,7 +1,9 @@
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use forwarding::{Socks5Frontend, SocksFrontend, SocksReply, TrafficCounters, relay_bidirectional};
-use ssh_engine::{DirectSshSession, DirectTcpStream, ForwardingFailure, SshChain, SshConnectError};
+use ssh_engine::{
+    DirectSshSession, DirectTcpStream, ForwardingFailure, SshChain, SshChainError, SshConnectError,
+};
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
@@ -19,6 +21,8 @@ const MAX_ACTIVE_CONNECTIONS: usize = 64;
 const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 const SOCKS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
+const HEALTH_INTERVAL: Duration = Duration::from_secs(10);
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum LocalForwardError {
@@ -26,6 +30,8 @@ pub enum LocalForwardError {
     NoListener,
     #[error("SSH session closed")]
     SessionClosed,
+    #[error("SSH health check failed: {0}")]
+    Health(#[source] Box<SshChainError>),
     #[error("local accept failed: {0}")]
     Accept(#[source] io::Error),
     #[error("listener shutdown failed: {0}")]
@@ -52,6 +58,7 @@ pub struct LocalForwardWorker {
     session: Option<SshChain>,
     mode: ForwardMode,
     cancellation: CancellationToken,
+    session_cancellation: CancellationToken,
     connections: JoinSet<io::Result<()>>,
     counters: Arc<TrafficCounters>,
 }
@@ -119,6 +126,7 @@ impl LocalForwardWorker {
             listener,
             session: Some(session),
             mode,
+            session_cancellation: cancellation.child_token(),
             cancellation,
             connections: JoinSet::new(),
             counters: Arc::new(TrafficCounters::default()),
@@ -147,13 +155,25 @@ impl LocalForwardWorker {
         // One pending open per accepted connection at most; requests cannot
         // accumulate after the connection task limit is reached.
         let (open_tx, mut open_rx) = mpsc::channel::<OpenRequest>(MAX_ACTIVE_CONNECTIONS);
-        let mut health_tick = interval(Duration::from_secs(1));
+        let mut health_tick = interval(HEALTH_INTERVAL);
+        let mut session_tick = interval(Duration::from_secs(1));
+        let mut ping_failures = 0u8;
         loop {
             tokio::select! {
                 biased;
                 _ = self.cancellation.cancelled() => return Ok(()),
-                _ = health_tick.tick() => {
+                _ = session_tick.tick() => {
                     if session.is_closed() { return Err(LocalForwardError::SessionClosed); }
+                }
+                _ = health_tick.tick() => {
+                    match session.ping_all(HEALTH_TIMEOUT).await {
+                        Ok(_) => ping_failures = 0,
+                        Err(error) => {
+                            ping_failures = ping_failures.saturating_add(1);
+                            if ping_failures >= 3 { return Err(LocalForwardError::Health(Box::new(error))); }
+                            warn!(%error, ping_failures, "SSH health check failed");
+                        }
+                    }
                 }
                 Some(result) = self.connections.join_next(), if !self.connections.is_empty() => {
                     match result {
@@ -179,7 +199,7 @@ impl LocalForwardWorker {
                     let (local, originator) = accepted.map_err(LocalForwardError::Accept)?;
                     let mode = self.mode.clone();
                     let requests = open_tx.clone();
-                    let cancellation = self.cancellation.child_token();
+                    let cancellation = self.session_cancellation.child_token();
                     let counters = Arc::clone(&self.counters);
                     self.connections.spawn(async move {
                         handle_connection(local, originator, mode, requests, cancellation, counters).await
@@ -189,8 +209,17 @@ impl LocalForwardWorker {
         }
     }
 
-    pub async fn stop(mut self) -> Result<(), LocalForwardError> {
+    pub async fn stop(self) -> Result<(), LocalForwardError> {
         self.cancellation.cancel();
+        let mut listener = self.release_listener().await;
+        listener.stop()?;
+        Ok(())
+    }
+
+    /// Ends one SSH attempt and its relay tasks while keeping the listener
+    /// bound for a reconnecting supervisor.
+    pub async fn release_listener(mut self) -> ListenerRuntime {
+        self.session_cancellation.cancel();
         let mut connections = std::mem::take(&mut self.connections);
         if timeout(SHUTDOWN_DEADLINE, async {
             while connections.join_next().await.is_some() {}
@@ -205,8 +234,7 @@ impl LocalForwardWorker {
         if let Some(session) = self.session.take() {
             session.disconnect().await;
         }
-        self.listener.stop()?;
-        Ok(())
+        std::mem::take(&mut self.listener)
     }
 }
 

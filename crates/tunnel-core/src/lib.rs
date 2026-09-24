@@ -6,6 +6,7 @@ mod remote_forward;
 mod retry;
 mod runtime;
 mod state_machine;
+mod supervisor;
 
 pub use local_forward::{LocalForwardError, LocalForwardWorker};
 pub use remote_forward::{RemoteForwardError, RemoteForwardWorker};
@@ -15,3 +16,4 @@ pub use state_machine::{
     Event, EventOutcome, Lifecycle, MachineError, RuntimePhase, StateMachine, StateTransition,
     TransitionEffect,
 };
+pub use supervisor::{LocalForwardSupervisor, SupervisorError, SupervisorMode, SupervisorState};
