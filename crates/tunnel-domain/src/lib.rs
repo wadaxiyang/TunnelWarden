@@ -5,6 +5,7 @@ mod group;
 mod host;
 mod state;
 mod tunnel;
+mod validation;
 
 pub use error::{FailureStage, Retryability, TunnelError, TunnelErrorKind};
 pub use group::{GroupId, TunnelGroup};
@@ -13,3 +14,4 @@ pub use state::{
     DesiredState, HealthIssue, HealthState, ListenerState, RuntimeState, StartPhase, TunnelSnapshot,
 };
 pub use tunnel::{LocalEndpoint, RemoteEndpoint, RetryPolicy, TunnelConfig, TunnelId, TunnelMode};
+pub use validation::TunnelValidationError;

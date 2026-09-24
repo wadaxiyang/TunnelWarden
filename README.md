@@ -43,7 +43,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 ## Architecture
 
 `tunnel-domain` contains configuration, errors, and state types without runtime
-or UI dependencies. `tunnel-core` owns the single-writer lifecycle reducer and
+or UI dependencies. Its `TunnelConfig::validate` checks mode-specific endpoints,
+jump-chain references, group references, and reconnect settings before startup.
+`tunnel-core` owns the single-writer lifecycle reducer and
 its bounded transition journal. `ListenerRuntime` is the first resource owner;
 the future supervisor will own it together with the SSH chain and relay tasks.
 `ssh-engine` owns direct SSH sessions and rejects unknown or changed host keys
