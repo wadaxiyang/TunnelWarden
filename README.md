@@ -19,12 +19,14 @@ listener owner. Tests bind a real loopback port, confirm a conflict is reported,
 and confirm Stop releases the port. The `ssh-engine` crate now uses `russh`
 0.63.x for a direct password-authenticated SSH connection with strict OpenSSH
 `known_hosts` checks and session ping; integration tests run against an
-in-process SSH server. Local forwarding now sends real bytes from a loopback
-listener through an authenticated `direct-tcpip` channel; its worker bounds and
-joins relay tasks, counts traffic, and releases the port on Stop. The automatic
-reconnect supervisor, Dynamic and Remote forwarding, Jump Chain, configuration,
-and GUI remain in progress. None of the v1.0 release gates should be considered
-passed.
+in-process SSH server. Local and Dynamic SOCKS5 forwarding now send real bytes
+from loopback listeners through authenticated `direct-tcpip` channels. Dynamic
+mode supports SOCKS5 CONNECT with IPv4, IPv6, and domain destinations; domains
+are passed unchanged to the SSH server for remote DNS. The worker bounds and
+joins connection tasks, counts traffic, and releases its port on Stop. An
+in-process SSH integration test covers both modes. The automatic reconnect
+supervisor, Remote forwarding, Jump Chain, configuration, and GUI remain in
+progress. None of the v1.0 release gates should be considered passed.
 
 ## Local checks
 
@@ -41,7 +43,7 @@ or UI dependencies. `tunnel-core` owns the single-writer lifecycle reducer and
 its bounded transition journal. `ListenerRuntime` is the first resource owner;
 the future supervisor will own it together with the SSH chain and relay tasks.
 `ssh-engine` owns direct SSH sessions and rejects unknown or changed host keys
-under the default strict policy. `forwarding` contains the bounded, counted
-bidirectional relay used by the Local worker.
+under the default strict policy. `forwarding` contains the counted bidirectional
+relay and a bounded SOCKS5 parser used by the Local and Dynamic worker.
 
 The complete design, implementation order, and release gates are in the spec.

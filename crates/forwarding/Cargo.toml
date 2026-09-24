@@ -8,4 +8,4 @@ rust-version.workspace = true
 [dependencies]
 tokio.workspace = true
 tokio-util.workspace = true
-
+thiserror.workspace = true

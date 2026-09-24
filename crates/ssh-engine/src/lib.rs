@@ -4,7 +4,7 @@ mod cancellable_stream;
 mod client;
 mod host_key;
 
-pub use client::{DirectSshSession, SshConnectError};
+pub use client::{DirectSshSession, ForwardingFailure, SshConnectError};
 pub use host_key::HostKeyError;
 
 pub type DirectTcpStream = russh::ChannelStream<russh::client::Msg>;

@@ -49,7 +49,34 @@ pub enum SshConnectError {
     ChannelOpen(#[source] russh::Error),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ForwardingFailure {
+    NotAllowed,
+    ConnectFailed,
+    ResourceShortage,
+    Timeout,
+    SessionUnavailable,
+    Other,
+}
+
 impl SshConnectError {
+    pub fn forwarding_failure(&self) -> ForwardingFailure {
+        match self {
+            Self::ChannelOpen(russh::Error::ChannelOpenFailure(
+                russh::ChannelOpenFailure::AdministrativelyProhibited,
+            )) => ForwardingFailure::NotAllowed,
+            Self::ChannelOpen(russh::Error::ChannelOpenFailure(
+                russh::ChannelOpenFailure::ConnectFailed,
+            )) => ForwardingFailure::ConnectFailed,
+            Self::ChannelOpen(russh::Error::ChannelOpenFailure(
+                russh::ChannelOpenFailure::ResourceShortage,
+            )) => ForwardingFailure::ResourceShortage,
+            Self::Timeout(_) => ForwardingFailure::Timeout,
+            Self::Cancelled | Self::Session(_) => ForwardingFailure::SessionUnavailable,
+            _ => ForwardingFailure::Other,
+        }
+    }
+
     /// Domain error used by the supervisor and UI. Details are intentionally
     /// bounded and never include the credential value.
     pub fn summary(&self) -> TunnelError {
@@ -295,19 +322,24 @@ impl DirectSshSession {
         let Some(handle) = self.handle.take() else {
             return Ok(());
         };
-        let send_result = handle
-            .disconnect(Disconnect::ByApplication, "TunnelWarden stopped", "")
-            .await;
-        let joined = timeout(SHUTDOWN_DEADLINE, handle).await;
+        let shutdown = timeout(SHUTDOWN_DEADLINE, async move {
+            let sent = handle
+                .disconnect(Disconnect::ByApplication, "TunnelWarden stopped", "")
+                .await;
+            let joined = handle.await;
+            (sent, joined)
+        })
+        .await;
         self.cancellation.cancel();
+        let (send_result, joined) =
+            shutdown.map_err(|_| SshConnectError::Timeout("SSH shutdown"))?;
         if let Err(source) = send_result {
             return Err(SshConnectError::Session(source));
         }
         match joined {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(HostKeyError::Protocol(russh::Error::Disconnect))) => Ok(()),
-            Ok(Err(source)) => Err(SshConnectError::Handshake(source)),
-            Err(_) => Err(SshConnectError::Timeout("SSH shutdown")),
+            Ok(()) => Ok(()),
+            Err(HostKeyError::Protocol(russh::Error::Disconnect)) => Ok(()),
+            Err(source) => Err(SshConnectError::Handshake(source)),
         }
     }
 }

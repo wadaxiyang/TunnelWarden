@@ -1,9 +1,11 @@
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
-use forwarding::{TrafficCounters, relay_bidirectional};
-use ssh_engine::DirectSshSession;
+use forwarding::{Socks5Frontend, SocksFrontend, SocksReply, TrafficCounters, relay_bidirectional};
+use ssh_engine::{DirectSshSession, DirectTcpStream, ForwardingFailure, SshConnectError};
 use thiserror::Error;
 use tokio::{
+    net::TcpStream,
+    sync::{mpsc, oneshot},
     task::JoinSet,
     time::{interval, timeout},
 };
@@ -15,6 +17,7 @@ use crate::{ListenerRuntime, ListenerRuntimeError};
 
 const MAX_ACTIVE_CONNECTIONS: usize = 64;
 const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+const SOCKS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Error)]
@@ -29,14 +32,27 @@ pub enum LocalForwardError {
     Shutdown(#[from] ListenerRuntimeError),
 }
 
-/// One active Local forwarding session. The owner drives `run` and then
-/// `stop`; the only task tree is `relays`, which is bounded and joined.
+#[derive(Clone)]
+enum ForwardMode {
+    Fixed(RemoteEndpoint),
+    Dynamic,
+}
+
+struct OpenRequest {
+    destination_host: String,
+    destination_port: u16,
+    originator: SocketAddr,
+    reply: oneshot::Sender<Result<DirectTcpStream, SshConnectError>>,
+}
+
+/// Owns the local listener, SSH session, and bounded connection task tree for
+/// either Local or Dynamic forwarding. The caller drives `run`, then `stop`.
 pub struct LocalForwardWorker {
     listener: ListenerRuntime,
     session: Option<DirectSshSession>,
-    destination: RemoteEndpoint,
+    mode: ForwardMode,
     cancellation: CancellationToken,
-    relays: JoinSet<io::Result<()>>,
+    connections: JoinSet<io::Result<()>>,
     counters: Arc<TrafficCounters>,
 }
 
@@ -47,15 +63,37 @@ impl LocalForwardWorker {
         destination: RemoteEndpoint,
         cancellation: CancellationToken,
     ) -> Result<Self, LocalForwardError> {
+        Self::build(
+            listener,
+            session,
+            ForwardMode::Fixed(destination),
+            cancellation,
+        )
+    }
+
+    pub fn new_dynamic(
+        listener: ListenerRuntime,
+        session: DirectSshSession,
+        cancellation: CancellationToken,
+    ) -> Result<Self, LocalForwardError> {
+        Self::build(listener, session, ForwardMode::Dynamic, cancellation)
+    }
+
+    fn build(
+        listener: ListenerRuntime,
+        session: DirectSshSession,
+        mode: ForwardMode,
+        cancellation: CancellationToken,
+    ) -> Result<Self, LocalForwardError> {
         if listener.listener().is_none() {
             return Err(LocalForwardError::NoListener);
         }
         Ok(Self {
             listener,
             session: Some(session),
-            destination,
+            mode,
             cancellation,
-            relays: JoinSet::new(),
+            connections: JoinSet::new(),
             counters: Arc::new(TrafficCounters::default()),
         })
     }
@@ -63,9 +101,11 @@ impl LocalForwardWorker {
     pub fn local_addr(&self) -> io::Result<Option<SocketAddr>> {
         self.listener.local_addr()
     }
+
     pub fn counters(&self) -> &TrafficCounters {
         &self.counters
     }
+
     pub fn cancellation_token(&self) -> CancellationToken {
         self.cancellation.clone()
     }
@@ -77,6 +117,9 @@ impl LocalForwardWorker {
         let Some(listener) = self.listener.listener() else {
             return Err(LocalForwardError::NoListener);
         };
+        // One pending open per accepted connection at most; requests cannot
+        // accumulate after the connection task limit is reached.
+        let (open_tx, mut open_rx) = mpsc::channel::<OpenRequest>(MAX_ACTIVE_CONNECTIONS);
         let mut health_tick = interval(Duration::from_secs(1));
         loop {
             tokio::select! {
@@ -85,35 +128,35 @@ impl LocalForwardWorker {
                 _ = health_tick.tick() => {
                     if session.is_closed() { return Err(LocalForwardError::SessionClosed); }
                 }
-                Some(result) = self.relays.join_next(), if !self.relays.is_empty() => {
+                Some(result) = self.connections.join_next(), if !self.connections.is_empty() => {
                     match result {
-                        Ok(Ok(())) => debug!("local relay completed"),
-                        Ok(Err(error)) => warn!(%error, "local relay failed"),
-                        Err(error) => warn!(%error, "local relay task failed"),
+                        Ok(Ok(())) => debug!("forwarded connection completed"),
+                        Ok(Err(error)) => warn!(%error, "forwarded connection failed"),
+                        Err(error) => warn!(%error, "forwarded connection task failed"),
                     }
                 }
-                accepted = listener.accept(), if self.relays.len() < MAX_ACTIVE_CONNECTIONS => {
+                Some(request) = open_rx.recv() => {
+                    let result = tokio::select! {
+                        biased;
+                        _ = self.cancellation.cancelled() => Err(SshConnectError::Cancelled),
+                        result = session.open_direct_tcpip(
+                            &request.destination_host,
+                            request.destination_port,
+                            request.originator,
+                            CHANNEL_OPEN_TIMEOUT,
+                        ) => result,
+                    };
+                    let _ = request.reply.send(result);
+                }
+                accepted = listener.accept(), if self.connections.len() < MAX_ACTIVE_CONNECTIONS => {
                     let (local, originator) = accepted.map_err(LocalForwardError::Accept)?;
-                    if session.is_closed() { return Err(LocalForwardError::SessionClosed); }
-                    let channel = session.open_direct_tcpip(
-                        &self.destination.host,
-                        self.destination.port,
-                        originator,
-                        CHANNEL_OPEN_TIMEOUT,
-                    ).await;
-                    match channel {
-                        Ok(channel) => {
-                            let cancellation = self.cancellation.child_token();
-                            let counters = Arc::clone(&self.counters);
-                            self.relays.spawn(async move {
-                                relay_bidirectional(local, channel, &cancellation, &counters).await
-                            });
-                        }
-                        Err(error) => {
-                            warn!(%error, %originator, "direct-tcpip channel rejected");
-                            // Dropping `local` closes this connection promptly.
-                        }
-                    }
+                    let mode = self.mode.clone();
+                    let requests = open_tx.clone();
+                    let cancellation = self.cancellation.child_token();
+                    let counters = Arc::clone(&self.counters);
+                    self.connections.spawn(async move {
+                        handle_connection(local, originator, mode, requests, cancellation, counters).await
+                    });
                 }
             }
         }
@@ -121,18 +164,138 @@ impl LocalForwardWorker {
 
     pub async fn stop(mut self) -> Result<(), LocalForwardError> {
         self.cancellation.cancel();
-        let mut relays = std::mem::take(&mut self.relays);
-        if timeout(SHUTDOWN_DEADLINE, relays.shutdown()).await.is_err() {
-            warn!("relay shutdown exceeded deadline; remaining tasks aborted");
+        let mut connections = std::mem::take(&mut self.connections);
+        if timeout(SHUTDOWN_DEADLINE, async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+        {
+            warn!("connection shutdown exceeded deadline; remaining tasks aborted");
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
         }
-        // The root cancellation has already closed the SSH transport. The
-        // explicit disconnect joins russh's session task when possible.
         if let Some(session) = self.session.take()
             && let Err(error) = session.disconnect().await
         {
-            debug!(%error, "SSH session closed during local forward stop");
+            debug!(%error, "SSH session closed during forward stop");
         }
         self.listener.stop()?;
         Ok(())
+    }
+}
+
+async fn handle_connection(
+    mut local: TcpStream,
+    originator: SocketAddr,
+    mode: ForwardMode,
+    requests: mpsc::Sender<OpenRequest>,
+    cancellation: CancellationToken,
+    counters: Arc<TrafficCounters>,
+) -> io::Result<()> {
+    let destination = match &mode {
+        ForwardMode::Fixed(destination) => (destination.host.clone(), destination.port),
+        ForwardMode::Dynamic => {
+            let parsed = tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => return Ok(()),
+                result = timeout(SOCKS_HANDSHAKE_TIMEOUT, Socks5Frontend.read_connect(&mut local)) => result,
+            };
+            match parsed {
+                Ok(Ok(request)) => (request.destination.host(), request.destination.port()),
+                Ok(Err(error)) => {
+                    debug!(%error, %originator, "SOCKS5 request rejected");
+                    return Ok(());
+                }
+                Err(_) => {
+                    debug!(%originator, "SOCKS5 handshake timed out");
+                    return Ok(());
+                }
+            }
+        }
+    };
+    let channel = request_channel(&requests, destination, originator, &cancellation).await;
+    let channel = match channel {
+        Ok(channel) => channel,
+        Err(error) => {
+            if matches!(mode, ForwardMode::Dynamic) && !cancellation.is_cancelled() {
+                let reply = map_socks_failure(&error);
+                let _ = timeout(
+                    CHANNEL_OPEN_TIMEOUT,
+                    Socks5Frontend.reply(&mut local, reply),
+                )
+                .await;
+            }
+            warn!(%error, %originator, "direct-tcpip channel rejected");
+            return Ok(());
+        }
+    };
+    if matches!(mode, ForwardMode::Dynamic) {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => return Ok(()),
+            result = Socks5Frontend.reply(&mut local, SocksReply::Succeeded) => {
+                result.map_err(io::Error::other)?;
+            }
+        }
+    }
+    relay_bidirectional(local, channel, &cancellation, &counters).await
+}
+
+async fn request_channel(
+    requests: &mpsc::Sender<OpenRequest>,
+    destination: (String, u16),
+    originator: SocketAddr,
+    cancellation: &CancellationToken,
+) -> Result<DirectTcpStream, SshConnectError> {
+    let (reply, result) = oneshot::channel();
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => return Err(SshConnectError::Cancelled),
+        sent = requests.send(OpenRequest {
+            destination_host: destination.0,
+            destination_port: destination.1,
+            originator,
+            reply,
+        }) => if sent.is_err() { return Err(SshConnectError::Cancelled); },
+    }
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(SshConnectError::Cancelled),
+        response = result => response.unwrap_or(Err(SshConnectError::Cancelled)),
+    }
+}
+
+fn map_socks_failure(error: &SshConnectError) -> SocksReply {
+    match error.forwarding_failure() {
+        ForwardingFailure::NotAllowed => SocksReply::NotAllowed,
+        ForwardingFailure::ConnectFailed => SocksReply::ConnectionRefused,
+        ForwardingFailure::Timeout => SocksReply::TtlExpired,
+        ForwardingFailure::SessionUnavailable => SocksReply::HostUnreachable,
+        ForwardingFailure::ResourceShortage | ForwardingFailure::Other => {
+            SocksReply::GeneralFailure
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use russh::{ChannelOpenFailure, Error};
+
+    #[test]
+    fn channel_failure_produces_socks_failure_instead_of_success() {
+        let refused = SshConnectError::ChannelOpen(Error::ChannelOpenFailure(
+            ChannelOpenFailure::ConnectFailed,
+        ));
+        assert_eq!(map_socks_failure(&refused), SocksReply::ConnectionRefused);
+        let denied = SshConnectError::ChannelOpen(Error::ChannelOpenFailure(
+            ChannelOpenFailure::AdministrativelyProhibited,
+        ));
+        assert_eq!(map_socks_failure(&denied), SocksReply::NotAllowed);
+        assert_eq!(
+            map_socks_failure(&SshConnectError::Timeout("direct-tcpip channel")),
+            SocksReply::TtlExpired
+        );
     }
 }
