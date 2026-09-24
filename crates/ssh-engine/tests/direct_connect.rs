@@ -414,3 +414,19 @@ async fn oversized_private_key_is_rejected_before_network_connect() {
     assert!(matches!(result, Err(SshConnectError::PrivateKeyTooLarge)));
     host.stop().await;
 }
+
+#[cfg(windows)]
+#[tokio::test]
+async fn unavailable_agent_reports_authentication_failure() {
+    let server = TestServer::start().await;
+    let directory = TempDir::new().expect("temporary directory");
+    let known_hosts = server.trust(directory.path(), &server.public_key);
+    let mut host = server.host();
+    host.auth = AuthConfig::Agent {
+        socket: Some(r"\\.\pipe\tunnelwarden-missing-test-agent".into()),
+    };
+    let cancellation = CancellationToken::new();
+    let result = DirectSshSession::connect_agent(&host, &[known_hosts], &cancellation).await;
+    assert!(matches!(result, Err(SshConnectError::Agent(_))));
+    server.stop().await;
+}

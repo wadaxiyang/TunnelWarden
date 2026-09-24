@@ -17,8 +17,8 @@ This repository is at the beginning of the internal work packages in
 workspace, domain types, a pure lifecycle state machine, and a Local/Dynamic
 listener owner. Tests bind a real loopback port, confirm a conflict is reported,
 and confirm Stop releases the port. The `ssh-engine` crate now uses `russh`
-0.63.x for direct password and private-key SSH authentication (including
-encrypted keys), strict OpenSSH `known_hosts` checks, and session ping;
+0.63.x for direct password, private-key (including encrypted keys), and SSH
+agent authentication, strict OpenSSH `known_hosts` checks, and session ping;
 integration tests run against an
 in-process SSH server. Local and Dynamic SOCKS5 forwarding now send real bytes
 from loopback listeners through authenticated `direct-tcpip` channels. Dynamic
@@ -29,8 +29,9 @@ in-process SSH integration test covers both modes. Remote forwarding also
 registers `tcpip-forward`, relays server-opened `forwarded-tcpip` channels to a
 local target, and cancels the registration during Stop. Its integration test
 checks data flow and cancellation acknowledgement. The automatic reconnect
-supervisor, Jump Chain, configuration, and GUI remain in progress. None of the
-v1.0 release gates should be considered passed.
+supervisor, Jump Chain, configuration storage, and GUI remain in progress. Agent
+authentication has an unavailable-agent test but still needs a positive test
+with a running agent. None of the v1.0 release gates should be considered passed.
 
 ## Local checks
 

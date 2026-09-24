@@ -11,7 +11,14 @@ use std::{
 
 use russh::{
     Disconnect, client,
-    keys::{PrivateKeyWithHashAlg, decode_secret_key},
+    keys::{
+        PrivateKeyWithHashAlg,
+        agent::{
+            AgentIdentity,
+            client::{AgentClient, AgentStream},
+        },
+        decode_secret_key,
+    },
 };
 use thiserror::Error;
 use tokio::{
@@ -35,11 +42,13 @@ use crate::{
 const MAX_KNOWN_HOSTS_PATHS: usize = 2;
 const MAX_PRIVATE_KEY_BYTES: u64 = 1024 * 1024;
 const MAX_FORWARDED_CHANNELS: usize = 64;
+const MAX_AGENT_IDENTITIES: usize = 32;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
 
 enum Credentials {
     Password(Zeroizing<String>),
     PrivateKey(Option<Zeroizing<String>>),
+    Agent,
 }
 
 #[derive(Debug, Error)]
@@ -64,6 +73,12 @@ pub enum SshConnectError {
     PrivateKeyIo(#[source] io::Error),
     #[error("cannot decode private key: {0}")]
     PrivateKeyDecode(#[source] russh::keys::Error),
+    #[error("SSH agent failed: {0}")]
+    Agent(#[source] russh::keys::Error),
+    #[error("SSH agent authentication failed: {0}")]
+    AgentAuthentication(#[source] russh::AgentAuthError),
+    #[error("SSH agent has no usable identities")]
+    NoAgentIdentities,
     #[error("SSH session operation failed: {0}")]
     Session(#[source] russh::Error),
     #[error("SSH direct-tcpip channel failed: {0}")]
@@ -184,6 +199,16 @@ impl SshConnectError {
                 FailureStage::Authentication,
                 Retryability::Blocked,
             ),
+            Self::Agent(_) | Self::AgentAuthentication(_) => (
+                TunnelErrorKind::Authentication,
+                FailureStage::Authentication,
+                Retryability::Transient,
+            ),
+            Self::NoAgentIdentities => (
+                TunnelErrorKind::Authentication,
+                FailureStage::Authentication,
+                Retryability::Blocked,
+            ),
             Self::Session(_) => (
                 TunnelErrorKind::Network,
                 FailureStage::HealthCheck,
@@ -256,6 +281,21 @@ impl DirectSshSession {
         .await
     }
 
+    pub async fn connect_agent(
+        host: &SshHost,
+        known_hosts_paths: &[PathBuf],
+        parent_cancellation: &CancellationToken,
+    ) -> Result<Self, SshConnectError> {
+        Self::connect_authenticated(
+            host,
+            Credentials::Agent,
+            known_hosts_paths,
+            parent_cancellation,
+            None,
+        )
+        .await
+    }
+
     /// Establishes a session prepared to receive only the specified reverse
     /// forwarding channel. Registration is a separate explicit step.
     pub async fn connect_password_for_remote(
@@ -285,6 +325,22 @@ impl DirectSshSession {
         Self::connect_authenticated(
             host,
             Credentials::PrivateKey(passphrase),
+            known_hosts_paths,
+            parent_cancellation,
+            Some(remote),
+        )
+        .await
+    }
+
+    pub async fn connect_agent_for_remote(
+        host: &SshHost,
+        known_hosts_paths: &[PathBuf],
+        parent_cancellation: &CancellationToken,
+        remote: RemoteEndpoint,
+    ) -> Result<Self, SshConnectError> {
+        Self::connect_authenticated(
+            host,
+            Credentials::Agent,
             known_hosts_paths,
             parent_cancellation,
             Some(remote),
@@ -547,6 +603,9 @@ async fn authenticate(
     credentials: Credentials,
     private_key: Option<Arc<russh::keys::PrivateKey>>,
 ) -> Result<(), SshConnectError> {
+    if matches!(credentials, Credentials::Agent) {
+        return authenticate_agent(handle, host).await;
+    }
     let result = match credentials {
         Credentials::Password(mut password) => {
             let raw_password = std::mem::take(&mut *password);
@@ -570,12 +629,102 @@ async fn authenticate(
                 .await
                 .map_err(SshConnectError::Authentication)?
         }
+        Credentials::Agent => return Err(SshConnectError::InvalidConfig("invalid agent state")),
     };
     if result.success() {
         Ok(())
     } else {
         Err(SshConnectError::AuthenticationRejected)
     }
+}
+
+type DynamicAgent = AgentClient<Box<dyn AgentStream + Send + Unpin>>;
+
+async fn authenticate_agent(
+    handle: &mut client::Handle<HostKeyVerifier>,
+    host: &SshHost,
+) -> Result<(), SshConnectError> {
+    let AuthConfig::Agent { socket } = &host.auth else {
+        return Err(SshConnectError::InvalidConfig("host auth must be agent"));
+    };
+    let mut agent = connect_agent_stream(socket.as_deref()).await?;
+    let identities = agent
+        .request_identities()
+        .await
+        .map_err(SshConnectError::Agent)?;
+    let hash = handle
+        .best_supported_rsa_hash()
+        .await
+        .map_err(SshConnectError::Authentication)?
+        .flatten();
+    let mut attempted = false;
+    for identity in identities.into_iter().take(MAX_AGENT_IDENTITIES) {
+        attempted = true;
+        let result = match identity {
+            AgentIdentity::PublicKey { key, .. } => {
+                handle
+                    .authenticate_publickey_with(host.username.as_str(), key, hash, &mut agent)
+                    .await
+            }
+            AgentIdentity::Certificate { certificate, .. } => {
+                handle
+                    .authenticate_certificate_with(
+                        host.username.as_str(),
+                        certificate,
+                        hash,
+                        &mut agent,
+                    )
+                    .await
+            }
+        }
+        .map_err(SshConnectError::AgentAuthentication)?;
+        if result.success() {
+            return Ok(());
+        }
+    }
+    if attempted {
+        Err(SshConnectError::AuthenticationRejected)
+    } else {
+        Err(SshConnectError::NoAgentIdentities)
+    }
+}
+
+#[cfg(windows)]
+async fn connect_agent_stream(socket: Option<&str>) -> Result<DynamicAgent, SshConnectError> {
+    if let Some(path) = socket {
+        return AgentClient::connect_named_pipe(path)
+            .await
+            .map(AgentClient::dynamic)
+            .map_err(SshConnectError::Agent);
+    }
+    match AgentClient::connect_named_pipe(r"\\.\pipe\openssh-ssh-agent").await {
+        Ok(agent) => Ok(agent.dynamic()),
+        Err(_) => AgentClient::connect_pageant()
+            .await
+            .map(AgentClient::dynamic)
+            .map_err(SshConnectError::Agent),
+    }
+}
+
+#[cfg(unix)]
+async fn connect_agent_stream(socket: Option<&str>) -> Result<DynamicAgent, SshConnectError> {
+    match socket {
+        Some(path) => AgentClient::connect_uds(path)
+            .await
+            .map(AgentClient::dynamic)
+            .map_err(SshConnectError::Agent),
+        None => AgentClient::connect_env()
+            .await
+            .map(AgentClient::dynamic)
+            .map_err(SshConnectError::Agent),
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
+async fn connect_agent_stream(_socket: Option<&str>) -> Result<DynamicAgent, SshConnectError> {
+    Err(SshConnectError::InvalidConfig(
+        "SSH agent is unsupported on this platform",
+    ))
 }
 
 async fn load_private_key(
@@ -606,6 +755,7 @@ fn validate(
     match (&host.auth, credentials) {
         (AuthConfig::Password { .. }, Credentials::Password(_)) => {}
         (AuthConfig::PrivateKey { .. }, Credentials::PrivateKey(_)) => {}
+        (AuthConfig::Agent { .. }, Credentials::Agent) => {}
         _ => return Err(SshConnectError::InvalidConfig("SSH auth method mismatch")),
     }
     if host.hostname.trim().is_empty() {
