@@ -25,9 +25,12 @@ from loopback listeners through authenticated `direct-tcpip` channels. Dynamic
 mode supports SOCKS5 CONNECT with IPv4, IPv6, and domain destinations; domains
 are passed unchanged to the SSH server for remote DNS. The worker bounds and
 joins connection tasks, counts traffic, and releases its port on Stop. An
-in-process SSH integration test covers both modes. The automatic reconnect
-supervisor, Remote forwarding, Jump Chain, configuration, and GUI remain in
-progress. None of the v1.0 release gates should be considered passed.
+in-process SSH integration test covers both modes. Remote forwarding also
+registers `tcpip-forward`, relays server-opened `forwarded-tcpip` channels to a
+local target, and cancels the registration during Stop. Its integration test
+checks data flow and cancellation acknowledgement. The automatic reconnect
+supervisor, Jump Chain, configuration, and GUI remain in progress. None of the
+v1.0 release gates should be considered passed.
 
 ## Local checks
 

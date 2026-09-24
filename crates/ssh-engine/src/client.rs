@@ -2,7 +2,10 @@ use std::{
     io,
     net::SocketAddr,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -14,11 +17,12 @@ use thiserror::Error;
 use tokio::{
     io::AsyncReadExt,
     net::TcpStream,
+    sync::mpsc,
     time::{timeout, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 use tunnel_domain::{
-    AuthConfig, FailureStage, Retryability, SshHost, TunnelError, TunnelErrorKind,
+    AuthConfig, FailureStage, RemoteEndpoint, Retryability, SshHost, TunnelError, TunnelErrorKind,
 };
 use zeroize::Zeroizing;
 
@@ -30,6 +34,7 @@ use crate::{
 
 const MAX_KNOWN_HOSTS_PATHS: usize = 2;
 const MAX_PRIVATE_KEY_BYTES: u64 = 1024 * 1024;
+const MAX_FORWARDED_CHANNELS: usize = 64;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
 
 enum Credentials {
@@ -63,6 +68,8 @@ pub enum SshConnectError {
     Session(#[source] russh::Error),
     #[error("SSH direct-tcpip channel failed: {0}")]
     ChannelOpen(#[source] russh::Error),
+    #[error("SSH remote forwarding request failed: {0}")]
+    RemoteForward(#[source] russh::Error),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -182,7 +189,7 @@ impl SshConnectError {
                 FailureStage::HealthCheck,
                 Retryability::Transient,
             ),
-            Self::ChannelOpen(_) => (
+            Self::ChannelOpen(_) | Self::RemoteForward(_) => (
                 TunnelErrorKind::Network,
                 FailureStage::Relay,
                 Retryability::Transient,
@@ -201,6 +208,14 @@ impl SshConnectError {
 pub struct DirectSshSession {
     handle: Option<client::Handle<HostKeyVerifier>>,
     cancellation: CancellationToken,
+    forwarded: Option<(RemoteEndpoint, mpsc::Receiver<DirectTcpStream>)>,
+    remote_active: Option<(String, u16)>,
+    remote_enabled: Option<Arc<AtomicU32>>,
+}
+
+pub struct RemoteForwardRegistration {
+    pub port: u16,
+    pub channels: mpsc::Receiver<DirectTcpStream>,
 }
 
 impl DirectSshSession {
@@ -218,6 +233,7 @@ impl DirectSshSession {
             Credentials::Password(password),
             known_hosts_paths,
             parent_cancellation,
+            None,
         )
         .await
     }
@@ -235,6 +251,43 @@ impl DirectSshSession {
             Credentials::PrivateKey(passphrase),
             known_hosts_paths,
             parent_cancellation,
+            None,
+        )
+        .await
+    }
+
+    /// Establishes a session prepared to receive only the specified reverse
+    /// forwarding channel. Registration is a separate explicit step.
+    pub async fn connect_password_for_remote(
+        host: &SshHost,
+        password: Zeroizing<String>,
+        known_hosts_paths: &[PathBuf],
+        parent_cancellation: &CancellationToken,
+        remote: RemoteEndpoint,
+    ) -> Result<Self, SshConnectError> {
+        Self::connect_authenticated(
+            host,
+            Credentials::Password(password),
+            known_hosts_paths,
+            parent_cancellation,
+            Some(remote),
+        )
+        .await
+    }
+
+    pub async fn connect_private_key_for_remote(
+        host: &SshHost,
+        passphrase: Option<Zeroizing<String>>,
+        known_hosts_paths: &[PathBuf],
+        parent_cancellation: &CancellationToken,
+        remote: RemoteEndpoint,
+    ) -> Result<Self, SshConnectError> {
+        Self::connect_authenticated(
+            host,
+            Credentials::PrivateKey(passphrase),
+            known_hosts_paths,
+            parent_cancellation,
+            Some(remote),
         )
         .await
     }
@@ -244,6 +297,7 @@ impl DirectSshSession {
         credentials: Credentials,
         known_hosts_paths: &[PathBuf],
         parent_cancellation: &CancellationToken,
+        remote: Option<RemoteEndpoint>,
     ) -> Result<Self, SshConnectError> {
         validate(host, &credentials, known_hosts_paths)?;
         let private_key = match (&host.auth, &credentials) {
@@ -275,11 +329,23 @@ impl DirectSshSession {
             keepalive_max: host.keepalive_max as usize,
             ..Default::default()
         });
+        let (forwarded_sender, forwarded, remote_enabled) = if let Some(binding) = remote {
+            let (sender, receiver) = mpsc::channel(MAX_FORWARDED_CHANNELS);
+            let enabled = Arc::new(AtomicU32::new(0));
+            (
+                Some((binding.clone(), sender, Arc::clone(&enabled))),
+                Some((binding, receiver)),
+                Some(enabled),
+            )
+        } else {
+            (None, None, None)
+        };
         let verifier = HostKeyVerifier {
             host: host.hostname.clone(),
             port: host.port,
             paths: known_hosts_paths.to_vec(),
             policy: host.host_key_policy,
+            forwarded: forwarded_sender,
         };
         let transport = CancellableStream::new(stream, cancellation.clone());
         let handshake = tokio::select! {
@@ -315,11 +381,80 @@ impl DirectSshSession {
         Ok(Self {
             handle: Some(handle),
             cancellation,
+            forwarded,
+            remote_active: None,
+            remote_enabled,
         })
     }
 
     pub fn is_closed(&self) -> bool {
         self.handle.as_ref().is_none_or(client::Handle::is_closed)
+    }
+
+    pub async fn request_remote_forward(
+        &mut self,
+        deadline: Duration,
+    ) -> Result<RemoteForwardRegistration, SshConnectError> {
+        let (binding, _) = self
+            .forwarded
+            .as_ref()
+            .ok_or(SshConnectError::InvalidConfig(
+                "session has no remote forward",
+            ))?;
+        if binding.host.is_empty() || binding.host.len() > 255 {
+            return Err(SshConnectError::InvalidConfig(
+                "invalid remote bind address",
+            ));
+        }
+        let handle = self.handle.as_ref().ok_or(SshConnectError::Cancelled)?;
+        let assigned = tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => return Err(SshConnectError::Cancelled),
+            result = timeout(deadline, handle.tcpip_forward(binding.host.clone(), u32::from(binding.port))) => {
+                result.map_err(|_| SshConnectError::Timeout("remote forward request"))?
+                    .map_err(SshConnectError::RemoteForward)?
+            }
+        };
+        let port = if binding.port == 0 {
+            u16::try_from(assigned)
+                .ok()
+                .filter(|port| *port != 0)
+                .ok_or(SshConnectError::InvalidConfig(
+                    "server returned invalid remote port",
+                ))?
+        } else {
+            binding.port
+        };
+        let (binding, channels) = self.forwarded.take().ok_or(SshConnectError::InvalidConfig(
+            "remote forward already registered",
+        ))?;
+        self.remote_active = Some((binding.host, port));
+        if let Some(enabled) = &self.remote_enabled {
+            enabled.store(u32::from(port), Ordering::Release);
+        }
+        Ok(RemoteForwardRegistration { port, channels })
+    }
+
+    pub async fn cancel_remote_forward(
+        &mut self,
+        deadline: Duration,
+    ) -> Result<(), SshConnectError> {
+        let Some((address, port)) = &self.remote_active else {
+            return Ok(());
+        };
+        if let Some(enabled) = &self.remote_enabled {
+            enabled.store(0, Ordering::Release);
+        }
+        let handle = self.handle.as_ref().ok_or(SshConnectError::Cancelled)?;
+        timeout(
+            deadline,
+            handle.cancel_tcpip_forward(address.clone(), u32::from(*port)),
+        )
+        .await
+        .map_err(|_| SshConnectError::Timeout("cancel remote forward"))?
+        .map_err(SshConnectError::RemoteForward)?;
+        self.remote_active = None;
+        Ok(())
     }
 
     /// Measures SSH session RTT. Socket/process existence is never used as a
@@ -399,6 +534,9 @@ impl DirectSshSession {
 
 impl Drop for DirectSshSession {
     fn drop(&mut self) {
+        if let Some(enabled) = &self.remote_enabled {
+            enabled.store(0, Ordering::Release);
+        }
         self.cancellation.cancel();
     }
 }

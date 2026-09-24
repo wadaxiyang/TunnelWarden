@@ -1,11 +1,21 @@
-use std::{fs, io, path::PathBuf};
+use std::{
+    fs, io,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicU32, Ordering},
+    },
+};
 
 use russh::{
-    client,
+    Channel, ChannelOpenFailure, client,
     keys::{HashAlg, PublicKeyOrCertificate, known_hosts},
 };
 use thiserror::Error;
-use tunnel_domain::HostKeyPolicy;
+use tokio::sync::mpsc;
+use tunnel_domain::{HostKeyPolicy, RemoteEndpoint};
+
+use crate::DirectTcpStream;
 
 const MAX_KNOWN_HOSTS_BYTES: u64 = 1024 * 1024;
 
@@ -49,10 +59,47 @@ pub(crate) struct HostKeyVerifier {
     pub(crate) port: u16,
     pub(crate) paths: Vec<PathBuf>,
     pub(crate) policy: HostKeyPolicy,
+    pub(crate) forwarded: Option<(
+        RemoteEndpoint,
+        mpsc::Sender<DirectTcpStream>,
+        Arc<AtomicU32>,
+    )>,
 }
 
 impl client::Handler for HostKeyVerifier {
     type Error = HostKeyError;
+
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: Channel<client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: client::ChannelOpenHandle,
+        _session: &mut client::Session,
+    ) -> Result<(), Self::Error> {
+        let Some((binding, sender, enabled)) = &self.forwarded else {
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        };
+        let active_port = enabled.load(Ordering::Acquire);
+        if active_port == 0 || binding.host != connected_address || active_port != connected_port {
+            reply
+                .reject(ChannelOpenFailure::AdministrativelyProhibited)
+                .await;
+            return Ok(());
+        }
+        let Ok(permit) = sender.try_reserve() else {
+            reply.reject(ChannelOpenFailure::ResourceShortage).await;
+            return Ok(());
+        };
+        reply.accept().await;
+        permit.send(channel.into_stream());
+        Ok(())
+    }
 
     async fn check_server_key(
         &mut self,
