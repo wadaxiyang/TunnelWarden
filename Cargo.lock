@@ -7351,6 +7351,7 @@ dependencies = [
 name = "ssh-engine"
 version = "0.1.0"
 dependencies = [
+ "futures",
  "rand 0.10.3",
  "russh",
  "tempfile",

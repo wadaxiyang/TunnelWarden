@@ -45,9 +45,9 @@ shows Degraded after a failed ping and restores Healthy when ping recovers.
 Configuration storage now
 loads and saves schema-v1 TOML with a 4 MiB read limit, a synced temporary file,
 atomic replacement, and five backups. Secrets are read from the OS keyring by
-reference on a blocking worker, never from TOML. Agent
-authentication has an unavailable-agent test but still needs a positive test
-with a running agent. The GUI uses GPUI Kit 0.6.6 and Rust 1.98.1. None of
+reference on a blocking worker, never from TOML. A Windows named-pipe test
+Agent now verifies key signing, authentication, and forwarded channel bytes.
+The GUI uses GPUI Kit 0.6.6 and Rust 1.98.1. None of
 the v1.0 release gates should be considered passed.
 
 ## Local checks

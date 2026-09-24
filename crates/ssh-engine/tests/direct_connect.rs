@@ -17,6 +17,13 @@ use tokio_util::sync::CancellationToken;
 use tunnel_domain::{AuthConfig, HostId, HostKeyPolicy, SecretRef, SshHost, TunnelErrorKind};
 use zeroize::Zeroizing;
 
+#[cfg(windows)]
+use futures::stream;
+#[cfg(windows)]
+use russh::keys::agent::{client::AgentClient, server as agent_server};
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::ServerOptions;
+
 struct PasswordServer {
     authorized_key: Option<russh::keys::PublicKey>,
 }
@@ -357,6 +364,71 @@ async fn private_key_authentication_opens_real_ssh_channel() {
     assert_eq!(&echo, b"key auth");
     drop(channel);
     session.disconnect().await.expect("disconnect");
+    server.stop().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn named_pipe_agent_authenticates_and_opens_channel() {
+    let identity =
+        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("generate client identity");
+    let server = TestServer::start_with_authorized_key(Some(identity.public_key().clone())).await;
+    let directory = TempDir::new().expect("temporary directory");
+    let known_hosts = server.trust(directory.path(), &server.public_key);
+    let pipe = format!(
+        r"\\.\pipe\TunnelWarden-Agent-Test-{}-{}",
+        std::process::id(),
+        rand::random::<u64>()
+    );
+    let first = ServerOptions::new()
+        .create(&pipe)
+        .expect("create agent pipe");
+    let listener = stream::unfold((pipe.clone(), Some(first)), |(path, first)| async move {
+        let pipe = match first {
+            Some(pipe) => pipe,
+            None => ServerOptions::new().create(&path).ok()?,
+        };
+        pipe.connect().await.ok()?;
+        Some((Ok::<_, std::io::Error>(pipe), (path, None)))
+    });
+    let agent_task = tokio::spawn(async move {
+        let _ = agent_server::serve(Box::pin(listener), ()).await;
+    });
+    let mut agent = AgentClient::connect_named_pipe(&pipe)
+        .await
+        .expect("connect test agent");
+    agent
+        .add_identity(&identity, &[])
+        .await
+        .expect("load test identity");
+    let mut host = server.host();
+    host.auth = AuthConfig::Agent { socket: Some(pipe) };
+    let cancellation = CancellationToken::new();
+    let session = DirectSshSession::connect_agent(&host, &[known_hosts], &cancellation)
+        .await
+        .expect("agent authentication");
+    session
+        .ping(Duration::from_secs(5))
+        .await
+        .expect("agent session ping");
+    let mut channel = session
+        .open_direct_tcpip(
+            "echo.internal",
+            7000,
+            "127.0.0.1:54321".parse().expect("origin"),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("agent channel");
+    channel.write_all(b"agent auth").await.expect("write");
+    let mut echo = [0u8; 10];
+    channel.read_exact(&mut echo).await.expect("read");
+    assert_eq!(&echo, b"agent auth");
+    drop(channel);
+    session.disconnect().await.expect("disconnect");
+    drop(agent);
+    agent_task.abort();
+    let _ = agent_task.await;
     server.stop().await;
 }
 
