@@ -17,8 +17,9 @@ This repository is at the beginning of the internal work packages in
 workspace, domain types, a pure lifecycle state machine, and a Local/Dynamic
 listener owner. Tests bind a real loopback port, confirm a conflict is reported,
 and confirm Stop releases the port. The `ssh-engine` crate now uses `russh`
-0.63.x for a direct password-authenticated SSH connection with strict OpenSSH
-`known_hosts` checks and session ping; integration tests run against an
+0.63.x for direct password and private-key SSH authentication (including
+encrypted keys), strict OpenSSH `known_hosts` checks, and session ping;
+integration tests run against an
 in-process SSH server. Local and Dynamic SOCKS5 forwarding now send real bytes
 from loopback listeners through authenticated `direct-tcpip` channels. Dynamic
 mode supports SOCKS5 CONNECT with IPv4, IPv6, and domain destinations; domains
@@ -43,7 +44,8 @@ or UI dependencies. `tunnel-core` owns the single-writer lifecycle reducer and
 its bounded transition journal. `ListenerRuntime` is the first resource owner;
 the future supervisor will own it together with the SSH chain and relay tasks.
 `ssh-engine` owns direct SSH sessions and rejects unknown or changed host keys
-under the default strict policy. `forwarding` contains the counted bidirectional
+under the default strict policy. Private-key input is capped at 1 MiB and its
+source text is zeroized after decoding. `forwarding` contains the counted bidirectional
 relay and a bounded SOCKS5 parser used by the Local and Dynamic worker.
 
 The complete design, implementation order, and release gates are in the spec.

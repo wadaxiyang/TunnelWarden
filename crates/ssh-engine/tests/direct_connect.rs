@@ -17,10 +17,24 @@ use tokio_util::sync::CancellationToken;
 use tunnel_domain::{AuthConfig, HostId, HostKeyPolicy, SecretRef, SshHost, TunnelErrorKind};
 use zeroize::Zeroizing;
 
-struct PasswordServer;
+struct PasswordServer {
+    authorized_key: Option<russh::keys::PublicKey>,
+}
 
 impl server::Handler for PasswordServer {
     type Error = russh::Error;
+
+    async fn auth_publickey(
+        &mut self,
+        username: &str,
+        public_key: &russh::keys::PublicKey,
+    ) -> Result<server::Auth, Self::Error> {
+        if username == "alice" && self.authorized_key.as_ref() == Some(public_key) {
+            Ok(server::Auth::Accept)
+        } else {
+            Ok(server::Auth::reject())
+        }
+    }
 
     async fn auth_password(
         &mut self,
@@ -67,6 +81,10 @@ struct TestServer {
 
 impl TestServer {
     async fn start() -> Self {
+        Self::start_with_authorized_key(None).await
+    }
+
+    async fn start_with_authorized_key(authorized_key: Option<russh::keys::PublicKey>) -> Self {
         let key =
             PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("generate host key");
         let public_key = key.public_key().clone();
@@ -81,7 +99,8 @@ impl TestServer {
         let address = listener.local_addr().expect("test address");
         let task = tokio::spawn(async move {
             if let Ok((socket, _)) = listener.accept().await
-                && let Ok(session) = server::run_stream(config, socket, PasswordServer).await
+                && let Ok(session) =
+                    server::run_stream(config, socket, PasswordServer { authorized_key }).await
             {
                 let _ = session.await;
             }
@@ -295,4 +314,103 @@ async fn wrong_password_does_not_create_authenticated_session() {
         Err(SshConnectError::AuthenticationRejected)
     ));
     server.stop().await;
+}
+
+#[tokio::test]
+async fn private_key_authentication_opens_real_ssh_channel() {
+    let identity =
+        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("generate client identity");
+    let server = TestServer::start_with_authorized_key(Some(identity.public_key().clone())).await;
+    let directory = TempDir::new().expect("temporary directory");
+    let known_hosts = server.trust(directory.path(), &server.public_key);
+    let key_path = directory.path().join("id_ed25519");
+    std::fs::write(
+        &key_path,
+        identity
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .expect("serialize identity")
+            .as_bytes(),
+    )
+    .expect("write identity");
+    let mut host = server.host();
+    host.auth = AuthConfig::PrivateKey {
+        key_path,
+        passphrase_ref: None,
+    };
+    let cancellation = CancellationToken::new();
+    let session = DirectSshSession::connect_private_key(&host, None, &[known_hosts], &cancellation)
+        .await
+        .expect("private key authentication");
+    session.ping(Duration::from_secs(5)).await.expect("ping");
+    let mut channel = session
+        .open_direct_tcpip(
+            "echo.internal",
+            7000,
+            "127.0.0.1:54321".parse().expect("origin"),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("channel");
+    channel.write_all(b"key auth").await.expect("write");
+    let mut echo = [0u8; 8];
+    channel.read_exact(&mut echo).await.expect("read");
+    assert_eq!(&echo, b"key auth");
+    drop(channel);
+    session.disconnect().await.expect("disconnect");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn encrypted_private_key_accepts_passphrase() {
+    let identity =
+        PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("generate client identity");
+    let server = TestServer::start_with_authorized_key(Some(identity.public_key().clone())).await;
+    let directory = TempDir::new().expect("temporary directory");
+    let known_hosts = server.trust(directory.path(), &server.public_key);
+    let key_path = directory.path().join("encrypted_id_ed25519");
+    let encrypted = identity
+        .encrypt(&mut rand::rng(), "passphrase")
+        .expect("encrypt identity");
+    std::fs::write(
+        &key_path,
+        encrypted
+            .to_openssh(russh::keys::ssh_key::LineEnding::LF)
+            .expect("serialize identity")
+            .as_bytes(),
+    )
+    .expect("write identity");
+    let mut host = server.host();
+    host.auth = AuthConfig::PrivateKey {
+        key_path,
+        passphrase_ref: Some(SecretRef("test-passphrase".into())),
+    };
+    let cancellation = CancellationToken::new();
+    let session = DirectSshSession::connect_private_key(
+        &host,
+        Some(Zeroizing::new("passphrase".into())),
+        &[known_hosts],
+        &cancellation,
+    )
+    .await
+    .expect("encrypted private key authentication");
+    session.ping(Duration::from_secs(5)).await.expect("ping");
+    session.disconnect().await.expect("disconnect");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn oversized_private_key_is_rejected_before_network_connect() {
+    let directory = TempDir::new().expect("temporary directory");
+    let key_path = directory.path().join("oversized_key");
+    std::fs::write(&key_path, vec![b'x'; 1024 * 1024 + 1]).expect("write oversized key");
+    let host = TestServer::start().await;
+    let mut config = host.host();
+    config.auth = AuthConfig::PrivateKey {
+        key_path,
+        passphrase_ref: None,
+    };
+    let cancellation = CancellationToken::new();
+    let result = DirectSshSession::connect_private_key(&config, None, &[], &cancellation).await;
+    assert!(matches!(result, Err(SshConnectError::PrivateKeyTooLarge)));
+    host.stop().await;
 }

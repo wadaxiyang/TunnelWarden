@@ -6,9 +6,13 @@ use std::{
     time::{Duration, Instant},
 };
 
-use russh::{Disconnect, client};
+use russh::{
+    Disconnect, client,
+    keys::{PrivateKeyWithHashAlg, decode_secret_key},
+};
 use thiserror::Error;
 use tokio::{
+    io::AsyncReadExt,
     net::TcpStream,
     time::{timeout, timeout_at},
 };
@@ -25,7 +29,13 @@ use crate::{
 };
 
 const MAX_KNOWN_HOSTS_PATHS: usize = 2;
+const MAX_PRIVATE_KEY_BYTES: u64 = 1024 * 1024;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
+
+enum Credentials {
+    Password(Zeroizing<String>),
+    PrivateKey(Option<Zeroizing<String>>),
+}
 
 #[derive(Debug, Error)]
 pub enum SshConnectError {
@@ -41,8 +51,14 @@ pub enum SshConnectError {
     Handshake(#[source] HostKeyError),
     #[error("SSH authentication failed: {0}")]
     Authentication(#[source] russh::Error),
-    #[error("SSH password was rejected")]
+    #[error("SSH credentials were rejected")]
     AuthenticationRejected,
+    #[error("private key file is too large")]
+    PrivateKeyTooLarge,
+    #[error("cannot read private key: {0}")]
+    PrivateKeyIo(#[source] io::Error),
+    #[error("cannot decode private key: {0}")]
+    PrivateKeyDecode(#[source] russh::keys::Error),
     #[error("SSH session operation failed: {0}")]
     Session(#[source] russh::Error),
     #[error("SSH direct-tcpip channel failed: {0}")]
@@ -156,6 +172,11 @@ impl SshConnectError {
                 FailureStage::Authentication,
                 Retryability::Transient,
             ),
+            Self::PrivateKeyTooLarge | Self::PrivateKeyIo(_) | Self::PrivateKeyDecode(_) => (
+                TunnelErrorKind::InvalidConfig,
+                FailureStage::Authentication,
+                Retryability::Blocked,
+            ),
             Self::Session(_) => (
                 TunnelErrorKind::Network,
                 FailureStage::HealthCheck,
@@ -188,11 +209,49 @@ impl DirectSshSession {
     /// Unknown/changed keys fail closed under Strict policy.
     pub async fn connect_password(
         host: &SshHost,
-        mut password: Zeroizing<String>,
+        password: Zeroizing<String>,
         known_hosts_paths: &[PathBuf],
         parent_cancellation: &CancellationToken,
     ) -> Result<Self, SshConnectError> {
-        validate(host, known_hosts_paths)?;
+        Self::connect_authenticated(
+            host,
+            Credentials::Password(password),
+            known_hosts_paths,
+            parent_cancellation,
+        )
+        .await
+    }
+
+    /// Authenticates with the private key configured on the host. The optional
+    /// passphrase is supplied by the credential store and zeroized on drop.
+    pub async fn connect_private_key(
+        host: &SshHost,
+        passphrase: Option<Zeroizing<String>>,
+        known_hosts_paths: &[PathBuf],
+        parent_cancellation: &CancellationToken,
+    ) -> Result<Self, SshConnectError> {
+        Self::connect_authenticated(
+            host,
+            Credentials::PrivateKey(passphrase),
+            known_hosts_paths,
+            parent_cancellation,
+        )
+        .await
+    }
+
+    async fn connect_authenticated(
+        host: &SshHost,
+        credentials: Credentials,
+        known_hosts_paths: &[PathBuf],
+        parent_cancellation: &CancellationToken,
+    ) -> Result<Self, SshConnectError> {
+        validate(host, &credentials, known_hosts_paths)?;
+        let private_key = match (&host.auth, &credentials) {
+            (AuthConfig::PrivateKey { key_path, .. }, Credentials::PrivateKey(passphrase)) => Some(
+                load_private_key(key_path, passphrase.as_ref().map(|value| value.as_str())).await?,
+            ),
+            _ => None,
+        };
         let cancellation = parent_cancellation.child_token();
         let deadline = tokio::time::Instant::now() + host.connect_timeout;
         let stream = tokio::select! {
@@ -242,18 +301,12 @@ impl DirectSshSession {
             }
         };
 
-        let raw_password = std::mem::take(&mut *password);
         let authentication = tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(SshConnectError::Cancelled),
-            result = timeout_at(deadline, handle.authenticate_password(host.username.as_str(), raw_password)) => {
-                match result {
-                    Ok(Ok(result)) if result.success() => Ok(()),
-                    Ok(Ok(_)) => Err(SshConnectError::AuthenticationRejected),
-                    Ok(Err(source)) => Err(SshConnectError::Authentication(source)),
-                    Err(_) => Err(SshConnectError::Timeout("authentication")),
-                }
-            }
+            result = timeout_at(deadline, authenticate(&mut handle, host, credentials, private_key)) => {
+                result.unwrap_or(Err(SshConnectError::Timeout("authentication")))
+            },
         };
         if let Err(error) = authentication {
             cancellation.cancel();
@@ -350,9 +403,72 @@ impl Drop for DirectSshSession {
     }
 }
 
-fn validate(host: &SshHost, known_hosts_paths: &[PathBuf]) -> Result<(), SshConnectError> {
-    if !matches!(host.auth, AuthConfig::Password { .. }) {
-        return Err(SshConnectError::InvalidConfig("host auth must be password"));
+async fn authenticate(
+    handle: &mut client::Handle<HostKeyVerifier>,
+    host: &SshHost,
+    credentials: Credentials,
+    private_key: Option<Arc<russh::keys::PrivateKey>>,
+) -> Result<(), SshConnectError> {
+    let result = match credentials {
+        Credentials::Password(mut password) => {
+            let raw_password = std::mem::take(&mut *password);
+            handle
+                .authenticate_password(host.username.as_str(), raw_password)
+                .await
+                .map_err(SshConnectError::Authentication)?
+        }
+        Credentials::PrivateKey(_) => {
+            let key = private_key.ok_or(SshConnectError::InvalidConfig("missing private key"))?;
+            let hash = handle
+                .best_supported_rsa_hash()
+                .await
+                .map_err(SshConnectError::Authentication)?
+                .flatten();
+            handle
+                .authenticate_publickey(
+                    host.username.as_str(),
+                    PrivateKeyWithHashAlg::new(key, hash),
+                )
+                .await
+                .map_err(SshConnectError::Authentication)?
+        }
+    };
+    if result.success() {
+        Ok(())
+    } else {
+        Err(SshConnectError::AuthenticationRejected)
+    }
+}
+
+async fn load_private_key(
+    path: &PathBuf,
+    passphrase: Option<&str>,
+) -> Result<Arc<russh::keys::PrivateKey>, SshConnectError> {
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(SshConnectError::PrivateKeyIo)?;
+    let mut reader = file.take(MAX_PRIVATE_KEY_BYTES + 1);
+    let mut pem = Zeroizing::new(String::new());
+    reader
+        .read_to_string(&mut pem)
+        .await
+        .map_err(SshConnectError::PrivateKeyIo)?;
+    if pem.len() as u64 > MAX_PRIVATE_KEY_BYTES {
+        return Err(SshConnectError::PrivateKeyTooLarge);
+    }
+    let key = decode_secret_key(&pem, passphrase).map_err(SshConnectError::PrivateKeyDecode)?;
+    Ok(Arc::new(key))
+}
+
+fn validate(
+    host: &SshHost,
+    credentials: &Credentials,
+    known_hosts_paths: &[PathBuf],
+) -> Result<(), SshConnectError> {
+    match (&host.auth, credentials) {
+        (AuthConfig::Password { .. }, Credentials::Password(_)) => {}
+        (AuthConfig::PrivateKey { .. }, Credentials::PrivateKey(_)) => {}
+        _ => return Err(SshConnectError::InvalidConfig("SSH auth method mismatch")),
     }
     if host.hostname.trim().is_empty() {
         return Err(SshConnectError::InvalidConfig("hostname is empty"));

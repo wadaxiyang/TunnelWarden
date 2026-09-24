@@ -10,7 +10,7 @@ rust-version = "1.94"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
-tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "io-util"] }
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "io-util", "fs"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 russh = { version = "=0.63.3", default-features = false, features = ["ring"] }
 zeroize = "1"
