@@ -40,6 +40,7 @@ pub enum SupervisorState {
     },
     Healthy {
         rtts: Vec<Duration>,
+        remote_port: Option<u16>,
     },
     Blocked {
         reason: String,
@@ -148,7 +149,7 @@ impl LocalForwardSupervisor {
             let chain = match result {
                 Ok(chain) => chain,
                 Err(error) => {
-                    let blocked = matches!(&error, SshChainError::Hop { source, .. } if source.summary().retryability == Retryability::Blocked);
+                    let blocked = chain_retryability(&error) == Retryability::Blocked;
                     if !self
                         .after_failure(attempt, error.to_string(), blocked)
                         .await?
@@ -188,7 +189,10 @@ impl LocalForwardSupervisor {
                     self.cancellation.clone(),
                 )?,
             };
-            self.state.send_replace(SupervisorState::Healthy { rtts });
+            self.state.send_replace(SupervisorState::Healthy {
+                rtts,
+                remote_port: None,
+            });
             let outcome = worker.run().await;
             self.listener = Some(worker.release_listener().await);
             if self.cancellation.is_cancelled() {
@@ -289,5 +293,12 @@ impl LocalForwardSupervisor {
             self.unhealthy_clients.abort_all();
             while self.unhealthy_clients.join_next().await.is_some() {}
         }
+    }
+}
+
+pub(crate) fn chain_retryability(error: &SshChainError) -> Retryability {
+    match error {
+        SshChainError::Empty | SshChainError::TooManyHops => Retryability::Blocked,
+        SshChainError::Hop { source, .. } => source.summary().retryability,
     }
 }

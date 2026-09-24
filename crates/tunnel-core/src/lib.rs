@@ -3,6 +3,7 @@
 
 mod local_forward;
 mod remote_forward;
+mod remote_supervisor;
 mod retry;
 mod runtime;
 mod state_machine;
@@ -10,6 +11,7 @@ mod supervisor;
 
 pub use local_forward::{LocalForwardError, LocalForwardWorker};
 pub use remote_forward::{RemoteForwardError, RemoteForwardWorker};
+pub use remote_supervisor::RemoteForwardSupervisor;
 pub use retry::RetrySchedule;
 pub use runtime::{ListenerRuntime, ListenerRuntimeError};
 pub use state_machine::{

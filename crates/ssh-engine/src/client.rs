@@ -219,6 +219,11 @@ impl SshConnectError {
                 FailureStage::HealthCheck,
                 Retryability::Transient,
             ),
+            Self::RemoteForward(russh::Error::RequestDenied) => (
+                TunnelErrorKind::RemoteForwardRejected,
+                FailureStage::RegisterForward,
+                Retryability::Blocked,
+            ),
             Self::ChannelOpen(_) | Self::RemoteForward(_) => (
                 TunnelErrorKind::Network,
                 FailureStage::Relay,

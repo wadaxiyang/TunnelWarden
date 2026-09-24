@@ -2,7 +2,8 @@ use std::{io, sync::Arc, time::Duration};
 
 use forwarding::{TrafficCounters, relay_bidirectional};
 use ssh_engine::{
-    DirectSshSession, DirectTcpStream, RemoteForwardRegistration, SshChain, SshConnectError,
+    DirectSshSession, DirectTcpStream, RemoteForwardRegistration, SshChain, SshChainError,
+    SshConnectError,
 };
 use thiserror::Error;
 use tokio::{
@@ -19,6 +20,8 @@ const MAX_ACTIVE_CONNECTIONS: usize = 64;
 const REMOTE_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const LOCAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
+const HEALTH_INTERVAL: Duration = Duration::from_secs(10);
+const HEALTH_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Error)]
 pub enum RemoteForwardError {
@@ -26,6 +29,8 @@ pub enum RemoteForwardError {
     InvalidTarget,
     #[error("SSH session closed")]
     SessionClosed,
+    #[error("SSH health check failed: {0}")]
+    Health(#[source] Box<SshChainError>),
     #[error("remote forward registration failed: {0}")]
     Registration(#[source] SshConnectError),
     #[error("remote forward cancellation failed: {0}")]
@@ -58,13 +63,20 @@ impl RemoteForwardWorker {
         cancellation: CancellationToken,
     ) -> Result<Self, RemoteForwardError> {
         if local_target.host.is_empty() || local_target.host.len() > 255 || local_target.port == 0 {
+            session.disconnect().await;
             return Err(RemoteForwardError::InvalidTarget);
         }
-        let RemoteForwardRegistration { port, channels } = session
+        let registration = session
             .final_session_mut()
             .request_remote_forward(REMOTE_REQUEST_TIMEOUT)
-            .await
-            .map_err(RemoteForwardError::Registration)?;
+            .await;
+        let RemoteForwardRegistration { port, channels } = match registration {
+            Ok(registration) => registration,
+            Err(error) => {
+                session.disconnect().await;
+                return Err(RemoteForwardError::Registration(error));
+            }
+        };
         Ok(Self {
             session: Some(session),
             channels,
@@ -92,13 +104,25 @@ impl RemoteForwardWorker {
         let Some(session) = self.session.as_ref() else {
             return Err(RemoteForwardError::SessionClosed);
         };
-        let mut health_tick = interval(Duration::from_secs(1));
+        let mut session_tick = interval(Duration::from_secs(1));
+        let mut health_tick = interval(HEALTH_INTERVAL);
+        let mut ping_failures = 0u8;
         loop {
             tokio::select! {
                 biased;
                 _ = self.cancellation.cancelled() => return Ok(()),
-                _ = health_tick.tick() => {
+                _ = session_tick.tick() => {
                     if session.is_closed() { return Err(RemoteForwardError::SessionClosed); }
+                }
+                _ = health_tick.tick() => {
+                    match session.ping_all(HEALTH_TIMEOUT).await {
+                        Ok(_) => ping_failures = 0,
+                        Err(error) => {
+                            ping_failures = ping_failures.saturating_add(1);
+                            if ping_failures >= 3 { return Err(RemoteForwardError::Health(Box::new(error))); }
+                            warn!(%error, ping_failures, "remote SSH health check failed");
+                        }
+                    }
                 }
                 Some(result) = self.connections.join_next(), if !self.connections.is_empty() => {
                     match result {
