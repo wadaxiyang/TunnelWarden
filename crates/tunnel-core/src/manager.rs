@@ -1,9 +1,16 @@
-use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
+use config_store::{ConfigDocument, ConfigStore, DomainConfig};
 use ssh_engine::{HopSpec, SshChain, SshChainError, SshCredential};
 use thiserror::Error;
 use tokio::{
-    sync::{Notify, mpsc, watch},
+    sync::{Notify, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, interval, timeout, timeout_at},
 };
@@ -36,13 +43,17 @@ pub struct TunnelView {
 
 pub type ManagerSnapshot = HashMap<TunnelId, TunnelView>;
 
-#[derive(Clone, Debug)]
 pub enum CoreCommand {
     StartTunnel(TunnelId),
     StopTunnel(TunnelId),
     RestartTunnel(TunnelId),
     RetryTunnel(TunnelId),
     NetworkRecovered,
+    SaveConfig {
+        directory: PathBuf,
+        config: DomainConfig,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -61,11 +72,13 @@ pub struct ManagerHandle {
 }
 
 impl ManagerHandle {
-    pub fn try_send(
-        &self,
-        command: CoreCommand,
-    ) -> Result<(), mpsc::error::TrySendError<CoreCommand>> {
-        self.commands.try_send(command)
+    pub fn try_send(&self, command: CoreCommand) -> Result<(), &'static str> {
+        self.commands
+            .try_send(command)
+            .map_err(|error| match error {
+                mpsc::error::TrySendError::Full(_) => "Tunnel manager is busy",
+                mpsc::error::TrySendError::Closed(_) => "Tunnel manager has stopped",
+            })
     }
 
     pub fn subscribe(&self) -> watch::Receiver<Arc<ManagerSnapshot>> {
@@ -188,6 +201,13 @@ impl TunnelManager {
                             }
                         }
                     }
+                    Some(CoreCommand::SaveConfig { directory, config, reply }) => {
+                        let result = Self::persist_config(directory, config.clone()).await;
+                        if result.is_ok() {
+                            self.replace_config(config).await;
+                        }
+                        let _ = reply.send(result);
+                    }
                     None => break,
                 },
                 _ = poll.tick(), if !self.active.is_empty() => self.refresh().await,
@@ -202,6 +222,66 @@ impl TunnelManager {
                 active.task.abort();
                 let _ = active.task.await;
             }
+        }
+    }
+
+    async fn persist_config(directory: PathBuf, config: DomainConfig) -> Result<(), String> {
+        tokio::task::spawn_blocking(move || {
+            let document = ConfigDocument::try_from(config).map_err(|error| error.to_string())?;
+            ConfigStore::new(directory)
+                .save(document)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+    }
+
+    async fn replace_config(&mut self, config: DomainConfig) {
+        let old_running: HashSet<TunnelId> = self.active.keys().cloned().collect();
+        let updated: HashMap<TunnelId, TunnelConfig> = config
+            .tunnels
+            .into_iter()
+            .map(|tunnel| (tunnel.id.clone(), tunnel))
+            .collect();
+        let needs_restart: Vec<TunnelId> = old_running
+            .iter()
+            .filter(|id| {
+                let Some(old) = self.tunnels.get(*id) else {
+                    return true;
+                };
+                let Some(new) = updated.get(*id) else {
+                    return true;
+                };
+                old != new
+                    || old.jump_chain.iter().any(|hop| {
+                        self.hosts.iter().find(|host| &host.id == hop)
+                            != config.hosts.iter().find(|host| &host.id == hop)
+                    })
+            })
+            .cloned()
+            .collect();
+        for id in &needs_restart {
+            self.stop(id).await;
+        }
+        self.hosts = config.hosts;
+        self.groups = config.groups;
+        self.tunnels = updated;
+        self.current.retain(|id, _| self.tunnels.contains_key(id));
+        for id in self.tunnels.keys() {
+            self.current.entry(id.clone()).or_insert(TunnelView {
+                state: SupervisorState::Stopped,
+                local_addr: None,
+            });
+        }
+        self.publish();
+        let to_start: Vec<TunnelId> = self
+            .tunnels
+            .values()
+            .filter(|tunnel| tunnel.auto_start || old_running.contains(&tunnel.id))
+            .map(|tunnel| tunnel.id.clone())
+            .collect();
+        for id in to_start {
+            self.start(&id).await;
         }
     }
 
@@ -482,4 +562,60 @@ async fn load_secret(
             hop,
             reason: reason.chars().take(256).collect(),
         })
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+    use config_store::AppSettings;
+    use tempfile::TempDir;
+
+    struct EmptyCredentials;
+    impl CredentialSource for EmptyCredentials {
+        fn load(&self, _: &SecretRef) -> Result<Zeroizing<String>, String> {
+            Err("no credentials configured".into())
+        }
+    }
+
+    #[tokio::test]
+    async fn saved_configuration_is_reloaded_by_manager() {
+        let directory = TempDir::new().expect("temporary directory");
+        let (manager, handle) = TunnelManager::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        let task = tokio::spawn(manager.run());
+        let (reply, answer) = oneshot::channel();
+        let app = AppSettings {
+            minimize_to_tray: true,
+            ..AppSettings::default()
+        };
+        assert!(
+            handle
+                .try_send(CoreCommand::SaveConfig {
+                    directory: directory.path().to_path_buf(),
+                    config: DomainConfig {
+                        app,
+                        hosts: Vec::new(),
+                        groups: Vec::new(),
+                        tunnels: Vec::new()
+                    },
+                    reply,
+                })
+                .is_ok()
+        );
+        assert!(answer.await.expect("save result").is_ok());
+        assert!(
+            ConfigStore::new(directory.path().to_path_buf())
+                .load()
+                .expect("load saved config")
+                .app
+                .minimize_to_tray
+        );
+        handle.shutdown();
+        task.await.expect("manager shutdown");
+    }
 }

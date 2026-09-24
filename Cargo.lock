@@ -8163,6 +8163,7 @@ dependencies = [
 name = "tunnel-core"
 version = "0.1.0"
 dependencies = [
+ "config-store",
  "forwarding",
  "proptest",
  "rand 0.10.3",

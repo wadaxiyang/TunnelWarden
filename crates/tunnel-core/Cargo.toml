@@ -6,6 +6,7 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+config-store = { path = "../config-store" }
 tunnel-domain = { path = "../tunnel-domain" }
 thiserror.workspace = true
 tokio.workspace = true

@@ -1,3 +1,4 @@
+mod editor;
 mod runtime_host;
 mod workspace;
 
