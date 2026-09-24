@@ -33,11 +33,15 @@ performs the second SSH handshake through the first hop's `direct-tcpip` channel
 and keeps both sessions owned until disconnect. The Local/Dynamic supervisor
 now retries with bounded jitter and keeps its listener bound across SSH loss;
 an integration test forces a disconnect and confirms traffic recovers on the
-same port. Remote supervision and GUI remain in progress. Configuration storage now
+same port. Remote supervision re-registers forwarding after SSH loss and
+cancels the remote registration on Stop. A GPUI Kit application shell now reads
+saved configuration and displays Overview, Jumpers, Tunnels, Logs and Settings;
+runtime commands and editors are still in progress. Configuration storage now
 loads and saves schema-v1 TOML with a 4 MiB read limit, a synced temporary file,
 atomic replacement, and five backups. Agent
 authentication has an unavailable-agent test but still needs a positive test
-with a running agent. None of the v1.0 release gates should be considered passed.
+with a running agent. The GUI uses GPUI Kit 0.6.6 and Rust 1.98.1. None of
+the v1.0 release gates should be considered passed.
 
 ## Local checks
 
@@ -54,9 +58,9 @@ atomic file replacement under `%APPDATA%\\TunnelWarden` or a chosen directory.
 `tunnel-domain` contains configuration, errors, and state types without runtime
 or UI dependencies. Its `TunnelConfig::validate` checks mode-specific endpoints,
 jump-chain references, group references, and reconnect settings before startup.
-`tunnel-core` owns the single-writer lifecycle reducer and
-its bounded transition journal. `ListenerRuntime` is the first resource owner;
-the future supervisor will own it together with the SSH chain and relay tasks.
+`tunnel-core` owns the lifecycle reducer, bounded transition journal, and
+Local/Dynamic and Remote reconnect supervisors. `ListenerRuntime` owns the
+Local/Dynamic port throughout retries.
 `ssh-engine` owns direct SSH sessions and rejects unknown or changed host keys
 under the default strict policy. Private-key input is capped at 1 MiB and its
 source text is zeroized after decoding. `forwarding` contains the counted bidirectional
