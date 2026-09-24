@@ -224,3 +224,95 @@ async fn second_ssh_handshake_and_forwarding_traverse_first_hop() {
     target_task.abort();
     let _ = target_task.await;
 }
+
+#[tokio::test]
+async fn third_ssh_handshake_and_forwarding_traverse_both_bastions() {
+    let (target_address, target_key, target_task) = start_server(TargetServer).await;
+    let (second_relay_tx, mut second_relay_rx) = mpsc::channel(1);
+    let (second_address, second_key, second_task) = start_server(BastionServer {
+        target: target_address,
+        relays: second_relay_tx,
+    })
+    .await;
+    let (first_relay_tx, mut first_relay_rx) = mpsc::channel(1);
+    let (first_address, first_key, first_task) = start_server(BastionServer {
+        target: second_address,
+        relays: first_relay_tx,
+    })
+    .await;
+    let directory = TempDir::new().expect("temporary directory");
+    let known_hosts = directory.path().join("known_hosts");
+    std::fs::write(
+        &known_hosts,
+        format!(
+            "[127.0.0.1]:{} {}\n[127.0.0.1]:{} {}\n[127.0.0.1]:{} {}\n",
+            first_address.port(),
+            first_key.to_openssh().expect("first key"),
+            second_address.port(),
+            second_key.to_openssh().expect("second key"),
+            target_address.port(),
+            target_key.to_openssh().expect("target key"),
+        ),
+    )
+    .expect("known_hosts");
+    let cancellation = CancellationToken::new();
+    let chain = SshChain::connect(
+        vec![
+            HopSpec {
+                host: host("first", first_address),
+                credential: SshCredential::Password(Zeroizing::new("bastion-secret".into())),
+                known_hosts_paths: vec![known_hosts.clone()],
+            },
+            HopSpec {
+                host: host("second", second_address),
+                credential: SshCredential::Password(Zeroizing::new("bastion-secret".into())),
+                known_hosts_paths: vec![known_hosts.clone()],
+            },
+            HopSpec {
+                host: host("target", target_address),
+                credential: SshCredential::Password(Zeroizing::new("target-secret".into())),
+                known_hosts_paths: vec![known_hosts],
+            },
+        ],
+        None,
+        &cancellation,
+    )
+    .await
+    .expect("three-hop SSH chain");
+    assert_eq!(
+        chain
+            .ping_all(Duration::from_secs(5))
+            .await
+            .expect("ping each hop")
+            .len(),
+        3
+    );
+    let mut forwarded = chain
+        .final_session()
+        .open_direct_tcpip(
+            "echo.internal",
+            7000,
+            "127.0.0.1:0".parse().expect("originator"),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("final direct-tcpip");
+    forwarded.write_all(b"three SSH hops").await.expect("write");
+    let mut echoed = [0u8; 14];
+    timeout(Duration::from_secs(5), forwarded.read_exact(&mut echoed))
+        .await
+        .expect("echo deadline")
+        .expect("echo read");
+    assert_eq!(&echoed, b"three SSH hops");
+    drop(forwarded);
+    chain.disconnect().await;
+    for rx in [&mut first_relay_rx, &mut second_relay_rx] {
+        if let Some(relay) = rx.recv().await {
+            let _ = timeout(Duration::from_secs(5), relay).await;
+        }
+    }
+    for task in [first_task, second_task, target_task] {
+        task.abort();
+        let _ = task.await;
+    }
+}

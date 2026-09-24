@@ -29,8 +29,9 @@ in-process SSH integration test covers both modes. Remote forwarding also
 registers `tcpip-forward`, relays server-opened `forwarded-tcpip` channels to a
 local target, and cancels the registration during Stop. Its integration test
 checks data flow and cancellation acknowledgement. A two-hop Jump Chain now
-performs the second SSH handshake through the first hop's `direct-tcpip` channel
-and keeps both sessions owned until disconnect. The Local/Dynamic supervisor
+performs later SSH handshakes through the preceding hop's `direct-tcpip` channel
+and keeps all sessions owned until disconnect. Two- and three-hop integration
+tests confirm authenticated final-hop traffic. The Local/Dynamic supervisor
 now retries with bounded jitter and keeps its listener bound across SSH loss;
 an integration test forces a disconnect and confirms traffic recovers on the
 same port. Remote supervision re-registers forwarding after SSH loss and
