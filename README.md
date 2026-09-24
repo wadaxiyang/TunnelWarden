@@ -19,9 +19,12 @@ listener owner. Tests bind a real loopback port, confirm a conflict is reported,
 and confirm Stop releases the port. The `ssh-engine` crate now uses `russh`
 0.63.x for a direct password-authenticated SSH connection with strict OpenSSH
 `known_hosts` checks and session ping; integration tests run against an
-in-process SSH server. The SSH session is not yet wired to the listener, and
-there is no forwarding or GUI. None of the v1.0 release gates should be
-considered passed.
+in-process SSH server. Local forwarding now sends real bytes from a loopback
+listener through an authenticated `direct-tcpip` channel; its worker bounds and
+joins relay tasks, counts traffic, and releases the port on Stop. The automatic
+reconnect supervisor, Dynamic and Remote forwarding, Jump Chain, configuration,
+and GUI remain in progress. None of the v1.0 release gates should be considered
+passed.
 
 ## Local checks
 
@@ -38,6 +41,7 @@ or UI dependencies. `tunnel-core` owns the single-writer lifecycle reducer and
 its bounded transition journal. `ListenerRuntime` is the first resource owner;
 the future supervisor will own it together with the SSH chain and relay tasks.
 `ssh-engine` owns direct SSH sessions and rejects unknown or changed host keys
-under the default strict policy.
+under the default strict policy. `forwarding` contains the bounded, counted
+bidirectional relay used by the Local worker.
 
 The complete design, implementation order, and release gates are in the spec.

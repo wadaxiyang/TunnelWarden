@@ -6,3 +6,5 @@ mod host_key;
 
 pub use client::{DirectSshSession, SshConnectError};
 pub use host_key::HostKeyError;
+
+pub type DirectTcpStream = russh::ChannelStream<russh::client::Msg>;

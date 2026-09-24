@@ -44,6 +44,10 @@ impl ListenerRuntime {
             .transpose()
     }
 
+    pub(crate) fn listener(&self) -> Option<&TcpListener> {
+        self.listener.as_ref()
+    }
+
     /// Bind is performed by Tokio's worker, never by the UI render thread.
     /// The listener remains owned across a later SSH reconnect until `stop`.
     pub async fn start_listener(

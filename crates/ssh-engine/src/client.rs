@@ -1,5 +1,6 @@
 use std::{
     io,
+    net::SocketAddr,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -18,6 +19,7 @@ use tunnel_domain::{
 use zeroize::Zeroizing;
 
 use crate::{
+    DirectTcpStream,
     cancellable_stream::CancellableStream,
     host_key::{HostKeyError, HostKeyVerifier},
 };
@@ -43,6 +45,8 @@ pub enum SshConnectError {
     AuthenticationRejected,
     #[error("SSH session operation failed: {0}")]
     Session(#[source] russh::Error),
+    #[error("SSH direct-tcpip channel failed: {0}")]
+    ChannelOpen(#[source] russh::Error),
 }
 
 impl SshConnectError {
@@ -128,6 +132,11 @@ impl SshConnectError {
             Self::Session(_) => (
                 TunnelErrorKind::Network,
                 FailureStage::HealthCheck,
+                Retryability::Transient,
+            ),
+            Self::ChannelOpen(_) => (
+                TunnelErrorKind::Network,
+                FailureStage::Relay,
                 Retryability::Transient,
             ),
         };
@@ -245,6 +254,37 @@ impl DirectSshSession {
                 Ok(Ok(())) => Ok(started.elapsed()),
                 Ok(Err(source)) => Err(SshConnectError::Session(source)),
                 Err(_) => Err(SshConnectError::Timeout("SSH ping")),
+            }
+        }
+    }
+
+    /// Opens one independent SSH forwarding channel. A DOMAIN destination is
+    /// passed verbatim to the SSH server, so DNS resolution stays remote.
+    pub async fn open_direct_tcpip(
+        &self,
+        destination_host: &str,
+        destination_port: u16,
+        originator: SocketAddr,
+        deadline: Duration,
+    ) -> Result<DirectTcpStream, SshConnectError> {
+        if destination_host.is_empty() || destination_host.len() > 255 || destination_port == 0 {
+            return Err(SshConnectError::InvalidConfig(
+                "invalid forwarding destination",
+            ));
+        }
+        let handle = self.handle.as_ref().ok_or(SshConnectError::Cancelled)?;
+        tokio::select! {
+            biased;
+            _ = self.cancellation.cancelled() => Err(SshConnectError::Cancelled),
+            result = timeout(deadline, handle.channel_open_direct_tcpip(
+                destination_host.to_owned(),
+                u32::from(destination_port),
+                originator.ip().to_string(),
+                u32::from(originator.port()),
+            )) => match result {
+                Ok(Ok(channel)) => Ok(channel.into_stream()),
+                Ok(Err(source)) => Err(SshConnectError::ChannelOpen(source)),
+                Err(_) => Err(SshConnectError::Timeout("direct-tcpip channel")),
             }
         }
     }

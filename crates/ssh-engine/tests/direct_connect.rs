@@ -1,6 +1,7 @@
 use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
 
 use russh::{
+    Channel, ChannelId,
     keys::{Algorithm, PrivateKey},
     server,
 };
@@ -31,6 +32,30 @@ impl server::Handler for PasswordServer {
         } else {
             Ok(server::Auth::reject())
         }
+    }
+
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        _channel: Channel<server::Msg>,
+        _host_to_connect: &str,
+        _port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        reply: server::ChannelOpenHandle,
+        _session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        reply.accept().await;
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: ChannelId,
+        data: &[u8],
+        session: &mut server::Session,
+    ) -> Result<(), Self::Error> {
+        session.data(channel, data.to_vec())?;
+        Ok(())
     }
 }
 
@@ -175,6 +200,41 @@ async fn matching_host_key_and_password_establish_real_ssh_and_ping() {
     assert!(session.ping(Duration::from_secs(5)).await.is_ok());
     let disconnected = session.disconnect().await;
     assert!(disconnected.is_ok(), "{disconnected:?}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn direct_tcpip_channel_carries_bytes_over_authenticated_session() {
+    let server = TestServer::start().await;
+    let directory = TempDir::new().expect("temporary directory");
+    let path = server.trust(directory.path(), &server.public_key);
+    let cancellation = CancellationToken::new();
+    let session = DirectSshSession::connect_password(
+        &server.host(),
+        Zeroizing::new("secret".into()),
+        &[path],
+        &cancellation,
+    )
+    .await
+    .expect("SSH connect and authenticate");
+    let mut channel = session
+        .open_direct_tcpip(
+            "echo.internal",
+            7000,
+            "127.0.0.1:54321".parse().expect("origin address"),
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("open direct-tcpip channel");
+    channel
+        .write_all(b"through ssh")
+        .await
+        .expect("channel write");
+    let mut echoed = [0u8; 11];
+    channel.read_exact(&mut echoed).await.expect("channel read");
+    assert_eq!(&echoed, b"through ssh");
+    drop(channel);
+    assert!(session.disconnect().await.is_ok());
     server.stop().await;
 }
 

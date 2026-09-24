@@ -9,6 +9,14 @@ rust-version.workspace = true
 tunnel-domain = { path = "../tunnel-domain" }
 thiserror.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+forwarding = { path = "../forwarding" }
+ssh-engine = { path = "../ssh-engine" }
 
 [dev-dependencies]
 proptest = "1"
+russh.workspace = true
+zeroize.workspace = true
+rand = "0.10"
+tempfile = "3"
