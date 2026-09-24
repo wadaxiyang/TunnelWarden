@@ -29,7 +29,9 @@ in-process SSH integration test covers both modes. Remote forwarding also
 registers `tcpip-forward`, relays server-opened `forwarded-tcpip` channels to a
 local target, and cancels the registration during Stop. Its integration test
 checks data flow and cancellation acknowledgement. The automatic reconnect
-supervisor, Jump Chain, configuration storage, and GUI remain in progress. Agent
+supervisor, Jump Chain, and GUI remain in progress. Configuration storage now
+loads and saves schema-v1 TOML with a 4 MiB read limit, a synced temporary file,
+atomic replacement, and five backups. Agent
 authentication has an unavailable-agent test but still needs a positive test
 with a running agent. None of the v1.0 release gates should be considered passed.
 
@@ -43,6 +45,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 ## Architecture
 
+`config-store` translates the versioned TOML schema to domain types and owns
+atomic file replacement under `%APPDATA%\\TunnelWarden` or a chosen directory.
 `tunnel-domain` contains configuration, errors, and state types without runtime
 or UI dependencies. Its `TunnelConfig::validate` checks mode-specific endpoints,
 jump-chain references, group references, and reconnect settings before startup.
