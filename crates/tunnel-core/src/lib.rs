@@ -2,9 +2,11 @@
 //! separate runtime, which must execute the effects returned by this model.
 
 mod retry;
+mod runtime;
 mod state_machine;
 
 pub use retry::RetrySchedule;
+pub use runtime::{ListenerRuntime, ListenerRuntimeError};
 pub use state_machine::{
     Event, EventOutcome, Lifecycle, MachineError, RuntimePhase, StateMachine, StateTransition,
     TransitionEffect,
