@@ -217,6 +217,11 @@ impl Workspace {
                     .values()
                     .filter(|view| matches!(view.state, SupervisorState::Reconnecting { .. }))
                     .count();
+                let degraded = self
+                    .snapshot
+                    .values()
+                    .filter(|view| matches!(view.state, SupervisorState::Degraded { .. }))
+                    .count();
                 let blocked = self
                     .snapshot
                     .values()
@@ -228,7 +233,7 @@ impl Workspace {
                     .flex()
                     .flex_col()
                     .child(format!(
-                        "{healthy} Healthy  ·  {reconnecting} Reconnecting  ·  {blocked} Blocked"
+                        "{healthy} Healthy  ·  {degraded} Degraded  ·  {reconnecting} Reconnecting  ·  {blocked} Blocked"
                     ))
                     .child(format!(
                         "{} saved tunnels · {} jumpers",
@@ -292,24 +297,34 @@ impl Workspace {
                 TunnelMode::Remote => "Remote",
                 TunnelMode::Dynamic => "SOCKS5",
             };
-            let state = self
-                .snapshot
-                .get(&tunnel.id)
+            let view = self.snapshot.get(&tunnel.id);
+            let state = view
                 .map(|view| &view.state)
                 .unwrap_or(&SupervisorState::Stopped);
             let label = state_label(state);
+            let details = status_details(state, view.and_then(|view| view.local_addr).is_some());
             let id = tunnel.id.clone();
             let (button_label, command) = match state {
                 SupervisorState::Stopped => ("Start", CoreCommand::StartTunnel(id.clone())),
-                SupervisorState::Blocked { .. } => {
-                    ("Retry", CoreCommand::RestartTunnel(id.clone()))
-                }
+                SupervisorState::Blocked { .. } => ("Retry", CoreCommand::RetryTunnel(id.clone())),
                 _ => ("Stop", CoreCommand::StopTunnel(id.clone())),
             };
             let action = Button::new(format!("{}-action", id.0))
                 .label(button_label)
                 .disabled(self.manager.is_none())
                 .on_click(cx.listener(move |this, _, _, cx| this.request(command.clone(), cx)));
+            let mut info = div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(tunnel.name.clone())
+                .child(format!(
+                    "{mode} · {}:{} · {label}",
+                    tunnel.local.host, tunnel.local.port
+                ));
+            if let Some(details) = details {
+                info = info.child(div().text_color(cx.theme().muted_foreground).child(details));
+            }
             rows = rows.child(
                 div()
                     .flex()
@@ -319,17 +334,7 @@ impl Workspace {
                     .py_2()
                     .border_b_1()
                     .border_color(cx.theme().border)
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap_1()
-                            .child(tunnel.name.clone())
-                            .child(format!(
-                                "{mode} · {}:{} · {label}",
-                                tunnel.local.host, tunnel.local.port
-                            )),
-                    )
+                    .child(info)
                     .child(action),
             );
         }
@@ -385,8 +390,45 @@ fn state_label(state: &SupervisorState) -> &'static str {
         SupervisorState::Connecting { .. } => "Connecting",
         SupervisorState::Reconnecting { .. } => "Reconnecting",
         SupervisorState::Healthy { .. } => "Healthy",
+        SupervisorState::Degraded { .. } => "Degraded",
         SupervisorState::Blocked { .. } => "Blocked",
         SupervisorState::Stopped => "Stopped",
+    }
+}
+
+fn status_details(state: &SupervisorState, listener_reserved: bool) -> Option<String> {
+    match state {
+        SupervisorState::Healthy { rtts, remote_port } => {
+            let latency = rtts.last().map(|rtt| format!("{} ms", rtt.as_millis()));
+            match (latency, remote_port) {
+                (Some(latency), Some(port)) => Some(format!("{latency} · Remote port {port}")),
+                (Some(latency), None) => Some(latency),
+                (None, Some(port)) => Some(format!("Remote port {port}")),
+                (None, None) => None,
+            }
+        }
+        SupervisorState::Degraded {
+            failed_pings,
+            reason,
+        } => Some(format!("Ping failure {failed_pings}/3 · {reason}")),
+        SupervisorState::Reconnecting {
+            attempt,
+            delay,
+            reason,
+        } => {
+            let listener = if listener_reserved {
+                " · Local listener remains reserved"
+            } else {
+                ""
+            };
+            Some(format!(
+                "Retry {attempt} after {}s · {reason}{listener}",
+                delay.as_secs_f32()
+            ))
+        }
+        SupervisorState::Blocked { reason } => Some(reason.clone()),
+        SupervisorState::Connecting { attempt } => Some(format!("SSH attempt {attempt}")),
+        SupervisorState::Stopped => None,
     }
 }
 

@@ -1,16 +1,22 @@
 use std::{
     future::Future,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
 use rand::RngExt;
 use ssh_engine::{SshChain, SshChainError};
-use tokio::{sync::watch, time::sleep};
+use tokio::{
+    sync::{Notify, watch},
+    time::sleep,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 use tunnel_domain::{LocalEndpoint, RetryPolicy, Retryability};
 
-use crate::{RemoteForwardError, RemoteForwardWorker, RetrySchedule, SupervisorState};
+use crate::{
+    RemoteForwardError, RemoteForwardWorker, RetrySchedule, SupervisorState, WorkerHealth,
+};
 
 const INITIAL_PING_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -22,6 +28,7 @@ pub struct RemoteForwardSupervisor {
     cancellation: CancellationToken,
     retries: RetrySchedule,
     state: watch::Sender<SupervisorState>,
+    retry_hint: Arc<Notify>,
 }
 
 impl RemoteForwardSupervisor {
@@ -36,11 +43,16 @@ impl RemoteForwardSupervisor {
             cancellation,
             retries: RetrySchedule::new(retry),
             state,
+            retry_hint: Arc::new(Notify::new()),
         }
     }
 
     pub fn subscribe(&self) -> watch::Receiver<SupervisorState> {
         self.state.subscribe()
+    }
+
+    pub fn retry_handle(&self) -> Arc<Notify> {
+        Arc::clone(&self.retry_hint)
     }
 
     pub async fn run<F, Fut>(self, mut connect: F)
@@ -119,14 +131,32 @@ impl RemoteForwardSupervisor {
                 remote_port: Some(worker.bound_port()),
             });
             let healthy_since = Instant::now();
-            let outcome = tokio::select! {
-                biased;
-                _ = self.cancellation.cancelled() => {
-                    worker_token.cancel();
-                    Ok(())
+            let remote_port = worker.bound_port();
+            let mut health = worker.subscribe_health();
+            let mut run = Box::pin(worker.run());
+            let outcome = loop {
+                tokio::select! {
+                    biased;
+                    _ = self.cancellation.cancelled() => {
+                        worker_token.cancel();
+                        break Ok(());
+                    }
+                    result = &mut run => break result,
+                    changed = health.changed() => {
+                        if changed.is_err() { break Err(RemoteForwardError::SessionClosed); }
+                        match &*health.borrow_and_update() {
+                            Some(WorkerHealth::Healthy { rtts }) => {
+                                self.state.send_replace(SupervisorState::Healthy { rtts: rtts.clone(), remote_port: Some(remote_port) });
+                            }
+                            Some(WorkerHealth::Degraded { failed_pings, reason }) => {
+                                self.state.send_replace(SupervisorState::Degraded { failed_pings: *failed_pings, reason: reason.clone() });
+                            }
+                            None => {}
+                        }
+                    }
                 }
-                result = worker.run() => result,
             };
+            drop(run);
             if let Err(error) = worker.stop().await {
                 warn!(%error, "remote forward cleanup failed");
             }
@@ -154,8 +184,11 @@ impl RemoteForwardSupervisor {
         let reason: String = reason.chars().take(512).collect();
         if blocked {
             self.state.send_replace(SupervisorState::Blocked { reason });
-            self.cancellation.cancelled().await;
-            return false;
+            return tokio::select! {
+                biased;
+                _ = self.cancellation.cancelled() => false,
+                _ = self.retry_hint.notified() => true,
+            };
         }
         let limit = self.retries.jitter_limit();
         let jitter = rand::rng().random_range(-limit..=limit);
@@ -169,6 +202,7 @@ impl RemoteForwardSupervisor {
             biased;
             _ = self.cancellation.cancelled() => false,
             _ = sleep(delay) => true,
+            _ = self.retry_hint.notified() => true,
         }
     }
 }

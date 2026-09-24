@@ -7,7 +7,7 @@ use ssh_engine::{
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, oneshot},
+    sync::{mpsc, oneshot, watch},
     task::JoinSet,
     time::{interval, timeout},
 };
@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use tunnel_domain::RemoteEndpoint;
 
-use crate::{ListenerRuntime, ListenerRuntimeError};
+use crate::{ListenerRuntime, ListenerRuntimeError, WorkerHealth};
 
 const MAX_ACTIVE_CONNECTIONS: usize = 64;
 const CHANNEL_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -61,6 +61,7 @@ pub struct LocalForwardWorker {
     session_cancellation: CancellationToken,
     connections: JoinSet<io::Result<()>>,
     counters: Arc<TrafficCounters>,
+    health: watch::Sender<Option<WorkerHealth>>,
 }
 
 impl LocalForwardWorker {
@@ -130,6 +131,7 @@ impl LocalForwardWorker {
             cancellation,
             connections: JoinSet::new(),
             counters: Arc::new(TrafficCounters::default()),
+            health: watch::channel(None).0,
         })
     }
 
@@ -139,6 +141,10 @@ impl LocalForwardWorker {
 
     pub fn counters(&self) -> &TrafficCounters {
         &self.counters
+    }
+
+    pub fn subscribe_health(&self) -> watch::Receiver<Option<WorkerHealth>> {
+        self.health.subscribe()
     }
 
     pub fn cancellation_token(&self) -> CancellationToken {
@@ -167,10 +173,14 @@ impl LocalForwardWorker {
                 }
                 _ = health_tick.tick() => {
                     match session.ping_all(HEALTH_TIMEOUT).await {
-                        Ok(_) => ping_failures = 0,
+                        Ok(rtts) => {
+                            ping_failures = 0;
+                            self.health.send_replace(Some(WorkerHealth::Healthy { rtts }));
+                        }
                         Err(error) => {
                             ping_failures = ping_failures.saturating_add(1);
                             if ping_failures >= 3 { return Err(LocalForwardError::Health(Box::new(error))); }
+                            self.health.send_replace(Some(WorkerHealth::Degraded { failed_pings: ping_failures, reason: error.to_string().chars().take(512).collect() }));
                             warn!(%error, ping_failures, "SSH health check failed");
                         }
                     }

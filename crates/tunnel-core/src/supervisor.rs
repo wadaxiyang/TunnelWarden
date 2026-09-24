@@ -2,6 +2,7 @@ use std::{
     future::Future,
     io,
     net::SocketAddr,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -11,7 +12,7 @@ use ssh_engine::{SshChain, SshChainError};
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
-    sync::watch,
+    sync::{Notify, watch},
     task::JoinSet,
     time::{sleep, timeout},
 };
@@ -21,6 +22,7 @@ use tunnel_domain::{RemoteEndpoint, RetryPolicy, Retryability};
 
 use crate::{
     ListenerRuntime, ListenerRuntimeError, LocalForwardError, LocalForwardWorker, RetrySchedule,
+    WorkerHealth,
 };
 
 const MAX_UNHEALTHY_CLIENTS: usize = 64;
@@ -41,6 +43,10 @@ pub enum SupervisorState {
     Healthy {
         rtts: Vec<Duration>,
         remote_port: Option<u16>,
+    },
+    Degraded {
+        failed_pings: u8,
+        reason: String,
     },
     Blocked {
         reason: String,
@@ -77,6 +83,7 @@ pub struct LocalForwardSupervisor {
     retries: RetrySchedule,
     state: watch::Sender<SupervisorState>,
     unhealthy_clients: JoinSet<()>,
+    retry_hint: Arc<Notify>,
 }
 
 impl LocalForwardSupervisor {
@@ -97,11 +104,16 @@ impl LocalForwardSupervisor {
             retries: RetrySchedule::new(retry),
             state,
             unhealthy_clients: JoinSet::new(),
+            retry_hint: Arc::new(Notify::new()),
         })
     }
 
     pub fn subscribe(&self) -> watch::Receiver<SupervisorState> {
         self.state.subscribe()
+    }
+
+    pub fn retry_handle(&self) -> Arc<Notify> {
+        Arc::clone(&self.retry_hint)
     }
 
     pub fn local_addr(&self) -> io::Result<Option<SocketAddr>> {
@@ -193,7 +205,26 @@ impl LocalForwardSupervisor {
                 rtts,
                 remote_port: None,
             });
-            let outcome = worker.run().await;
+            let mut health = worker.subscribe_health();
+            let mut run = Box::pin(worker.run());
+            let outcome = loop {
+                tokio::select! {
+                    result = &mut run => break result,
+                    changed = health.changed() => {
+                        if changed.is_err() { break Err(LocalForwardError::SessionClosed); }
+                        match &*health.borrow_and_update() {
+                            Some(WorkerHealth::Healthy { rtts }) => {
+                                self.state.send_replace(SupervisorState::Healthy { rtts: rtts.clone(), remote_port: None });
+                            }
+                            Some(WorkerHealth::Degraded { failed_pings, reason }) => {
+                                self.state.send_replace(SupervisorState::Degraded { failed_pings: *failed_pings, reason: reason.clone() });
+                            }
+                            None => {}
+                        }
+                    }
+                }
+            };
+            drop(run);
             self.listener = Some(worker.release_listener().await);
             if self.cancellation.is_cancelled() {
                 break;
@@ -223,8 +254,8 @@ impl LocalForwardSupervisor {
         let reason: String = reason.chars().take(512).collect();
         if blocked {
             self.state.send_replace(SupervisorState::Blocked { reason });
-            let stop = self.cancellation.clone();
-            return Ok(self.while_unhealthy(stop.cancelled()).await?.is_some());
+            let hint = Arc::clone(&self.retry_hint);
+            return Ok(self.while_unhealthy(hint.notified()).await?.is_some());
         }
         let limit = self.retries.jitter_limit();
         let jitter = rand::rng().random_range(-limit..=limit);
@@ -234,7 +265,16 @@ impl LocalForwardSupervisor {
             delay,
             reason,
         });
-        Ok(self.while_unhealthy(sleep(delay)).await?.is_some())
+        let hint = Arc::clone(&self.retry_hint);
+        Ok(self
+            .while_unhealthy(async move {
+                tokio::select! {
+                    _ = sleep(delay) => {},
+                    _ = hint.notified() => {},
+                }
+            })
+            .await?
+            .is_some())
     }
 
     async fn while_unhealthy<T>(

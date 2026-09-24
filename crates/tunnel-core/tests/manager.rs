@@ -51,7 +51,11 @@ async fn stop_during_reconnect_releases_the_owned_listener() {
         },
         remote: None,
         auto_start: false,
-        reconnect: RetryPolicy::default(),
+        reconnect: RetryPolicy {
+            base_delay: Duration::from_secs(10),
+            max_delay: Duration::from_secs(30),
+            ..RetryPolicy::default()
+        },
         description: String::new(),
     };
     let (manager, handle) =
@@ -75,6 +79,23 @@ async fn stop_during_reconnect_releases_the_owned_listener() {
     })
     .await
     .expect("reconnecting deadline");
+    assert!(TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)).is_err());
+    handle
+        .try_send(CoreCommand::RetryTunnel(id.clone()))
+        .expect("retry command");
+    timeout(Duration::from_secs(3), async {
+        loop {
+            if matches!(
+                &state.borrow().get(&id).expect("tunnel snapshot").state,
+                SupervisorState::Reconnecting { attempt: 2, .. }
+            ) {
+                break;
+            }
+            state.changed().await.expect("snapshot sender");
+        }
+    })
+    .await
+    .expect("early retry deadline");
     assert!(TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)).is_err());
     handle
         .try_send(CoreCommand::StopTunnel(id.clone()))

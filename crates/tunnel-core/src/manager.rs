@@ -3,7 +3,7 @@ use std::{collections::HashMap, net::SocketAddr, path::PathBuf, sync::Arc, time:
 use ssh_engine::{HopSpec, SshChain, SshChainError, SshCredential};
 use thiserror::Error;
 use tokio::{
-    sync::{mpsc, watch},
+    sync::{Notify, mpsc, watch},
     task::JoinHandle,
     time::{Instant, interval, timeout, timeout_at},
 };
@@ -41,6 +41,8 @@ pub enum CoreCommand {
     StartTunnel(TunnelId),
     StopTunnel(TunnelId),
     RestartTunnel(TunnelId),
+    RetryTunnel(TunnelId),
+    NetworkRecovered,
 }
 
 #[derive(Debug, Error)]
@@ -79,6 +81,7 @@ struct ActiveTunnel {
     cancellation: CancellationToken,
     task: JoinHandle<Option<String>>,
     state: watch::Receiver<SupervisorState>,
+    retry_hint: Arc<Notify>,
 }
 
 /// Single writer for desired tunnel state and the bounded UI snapshot. It owns
@@ -169,6 +172,22 @@ impl TunnelManager {
                         self.stop(&id).await;
                         self.start(&id).await;
                     }
+                    Some(CoreCommand::RetryTunnel(id)) => {
+                        if let Some(active) = self.active.get(&id) {
+                            if matches!(&*active.state.borrow(), SupervisorState::Blocked { .. } | SupervisorState::Reconnecting { .. }) {
+                                active.retry_hint.notify_one();
+                            }
+                        } else {
+                            self.start(&id).await;
+                        }
+                    }
+                    Some(CoreCommand::NetworkRecovered) => {
+                        for active in self.active.values() {
+                            if matches!(&*active.state.borrow(), SupervisorState::Reconnecting { .. }) {
+                                active.retry_hint.notify_one();
+                            }
+                        }
+                    }
                     None => break,
                 },
                 _ = poll.tick(), if !self.active.is_empty() => self.refresh().await,
@@ -222,7 +241,7 @@ impl TunnelManager {
             }
         };
         let cancellation = CancellationToken::new();
-        let (task, state, local_addr) = match tunnel.mode {
+        let (task, state, local_addr, retry_hint) = match tunnel.mode {
             TunnelMode::Local | TunnelMode::Dynamic => {
                 let address: SocketAddr =
                     match format!("{}:{}", tunnel.local.host, tunnel.local.port).parse() {
@@ -286,6 +305,7 @@ impl TunnelManager {
                     }
                 };
                 let state = supervisor.subscribe();
+                let retry_hint = supervisor.retry_handle();
                 let credentials = Arc::clone(&self.credentials);
                 let remote = None;
                 let connect_cancel = cancellation.clone();
@@ -305,7 +325,7 @@ impl TunnelManager {
                         .err()
                         .map(|error| error.to_string())
                 });
-                (task, state, local_addr)
+                (task, state, local_addr, retry_hint)
             }
             TunnelMode::Remote => {
                 let supervisor = RemoteForwardSupervisor::new(
@@ -314,6 +334,7 @@ impl TunnelManager {
                     tunnel.reconnect.clone(),
                 );
                 let state = supervisor.subscribe();
+                let retry_hint = supervisor.retry_handle();
                 let credentials = Arc::clone(&self.credentials);
                 let remote = tunnel.remote.clone();
                 let task = tokio::spawn(async move {
@@ -330,7 +351,7 @@ impl TunnelManager {
                         .await;
                     None
                 });
-                (task, state, None)
+                (task, state, None, retry_hint)
             }
         };
         self.set_state(id, SupervisorState::Connecting { attempt: 1 }, local_addr);
@@ -340,6 +361,7 @@ impl TunnelManager {
                 cancellation,
                 task,
                 state,
+                retry_hint,
             },
         );
     }

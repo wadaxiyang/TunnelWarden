@@ -1,6 +1,7 @@
 //! Single-writer tunnel lifecycle model. Network resources will be owned by a
 //! separate runtime, which must execute the effects returned by this model.
 
+mod health;
 mod local_forward;
 mod manager;
 mod remote_forward;
@@ -10,6 +11,7 @@ mod runtime;
 mod state_machine;
 mod supervisor;
 
+pub use health::WorkerHealth;
 pub use local_forward::{LocalForwardError, LocalForwardWorker};
 pub use manager::{
     CoreCommand, CredentialSource, ManagerError, ManagerHandle, ManagerSnapshot, TunnelManager,

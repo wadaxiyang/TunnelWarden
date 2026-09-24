@@ -38,7 +38,11 @@ cancels the remote registration on Stop. A GPUI Kit application shell now reads
 saved configuration and displays Overview, Jumpers, Tunnels, Logs and Settings.
 Tunnels can be started, stopped, and retried through a Tokio-owned single-writer
 manager, and configured auto-start tunnels start with the runtime. Editors and
-other desktop integration remain in progress. Configuration storage now
+other desktop integration remain in progress. Manual retry interrupts a
+backoff or blocked wait without releasing a Local/Dynamic listener; a network
+recovery command is available for the platform layer to send. The GUI now
+shows Degraded after a failed ping and restores Healthy when ping recovers.
+Configuration storage now
 loads and saves schema-v1 TOML with a 4 MiB read limit, a synced temporary file,
 atomic replacement, and five backups. Secrets are read from the OS keyring by
 reference on a blocking worker, never from TOML. Agent
