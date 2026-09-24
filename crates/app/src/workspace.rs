@@ -8,18 +8,19 @@ use gpui_kit::base::{Disableable, Selectable, StyledExt};
 use gpui_kit::component::{
     ActiveTheme,
     button::{Button, ButtonVariants},
-    input::{Input, InputContentType, InputState},
+    input::{Input, InputContentType, InputEvent, InputState},
     scroll::ScrollableElement,
 };
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    AppContext as _, AsyncApp, Context, Entity, IntoElement, ParentElement as _, PathPromptOptions,
-    Render, Styled as _, Task, Window, div, rems,
+    AppContext as _, AsyncApp, Context, Entity, InteractiveElement as _, IntoElement,
+    ParentElement as _, PathPromptOptions, Render, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, TestSupportExt as _, Window, div, rems,
 };
 use tokio::sync::oneshot;
 use tunnel_core::{
-    CoreCommand, HostKeyDecision, HostKeyPromptView, ManagerHandle, ManagerSnapshot, SecretUpdate,
-    SupervisorState,
+    CoreCommand, HostKeyDecision, HostKeyPromptView, LogEvent, LogLevel, LogSnapshot, LogSource,
+    ManagerHandle, ManagerSnapshot, SecretUpdate, SupervisorState,
 };
 use tunnel_domain::TunnelMode;
 use tunnel_domain::{AuthConfig, GroupId, HostId, HostKeyPolicy, SecretRef, TunnelGroup, TunnelId};
@@ -28,7 +29,44 @@ use crate::editor::{Editor, HostEditor, TunnelEditor};
 
 const PAGE_SIZE: usize = 25;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LogFilter {
+    All,
+    Debug,
+    Info,
+    Warning,
+    Error,
+    Tunnel,
+    Host,
+}
+
+impl LogFilter {
+    fn label(self) -> &'static str {
+        match self {
+            Self::All => "All",
+            Self::Debug => "Debug",
+            Self::Info => "Info",
+            Self::Warning => "Warning",
+            Self::Error => "Error",
+            Self::Tunnel => "Tunnel",
+            Self::Host => "Host",
+        }
+    }
+
+    fn matches(self, event: &LogEvent) -> bool {
+        match self {
+            Self::All => true,
+            Self::Debug => event.level == LogLevel::Debug,
+            Self::Info => event.level == LogLevel::Info,
+            Self::Warning => event.level == LogLevel::Warning,
+            Self::Error => event.level == LogLevel::Error,
+            Self::Tunnel => event.source == LogSource::Tunnel,
+            Self::Host => event.source == LogSource::Host,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Page {
     Overview,
     Jumpers,
@@ -66,7 +104,12 @@ pub struct Workspace {
     runtime_error: Option<String>,
     _updates: Option<Task<()>>,
     _host_key_updates: Option<Task<()>>,
+    _log_updates: Option<Task<()>>,
     host_key_prompts: Arc<Vec<HostKeyPromptView>>,
+    logs: Arc<LogSnapshot>,
+    log_filter: LogFilter,
+    log_search: Entity<InputState>,
+    _log_search_subscription: Subscription,
     editor: Option<Editor>,
     group_editor: Option<GroupEditor>,
     pending_group_delete: Option<GroupId>,
@@ -85,7 +128,7 @@ impl Workspace {
         startup: Result<(PathBuf, DomainConfig), String>,
         manager: Option<ManagerHandle>,
         runtime_error: Option<String>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let (snapshot, updates) = match &manager {
@@ -132,6 +175,35 @@ impl Workspace {
             }
             None => (Arc::new(Vec::new()), None),
         };
+        let (logs, log_updates) = match &manager {
+            Some(manager) => {
+                let mut state = manager.subscribe_logs();
+                let logs = Arc::clone(&state.borrow_and_update());
+                let updates = cx.spawn(async move |this, cx: &mut AsyncApp| {
+                    while state.changed().await.is_ok() {
+                        let latest = Arc::clone(&state.borrow_and_update());
+                        if this
+                            .update(cx, |view, cx| {
+                                view.logs = latest;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                (logs, Some(updates))
+            }
+            None => (Arc::new(LogSnapshot::new()), None),
+        };
+        let log_search = cx.new(|cx| InputState::new(window, cx));
+        let log_search_subscription = cx.subscribe(&log_search, |this, _, event, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.page_index = 0;
+                cx.notify();
+            }
+        });
         Self {
             page: Page::Overview,
             page_index: 0,
@@ -142,7 +214,12 @@ impl Workspace {
             runtime_error,
             _updates: updates,
             _host_key_updates: host_key_updates,
+            _log_updates: log_updates,
             host_key_prompts,
+            logs,
+            log_filter: LogFilter::All,
+            log_search,
+            _log_search_subscription: log_search_subscription,
             editor: None,
             group_editor: None,
             pending_group_delete: None,
@@ -709,6 +786,7 @@ impl Workspace {
                     .ghost()
                     .label(page.title())
                     .selected(self.page == page)
+                    .toggled(self.page == page)
                     .on_click(cx.listener(move |this, _, _, cx| this.select_page(page, cx))),
             );
         }
@@ -717,6 +795,7 @@ impl Workspace {
                 .ghost()
                 .label("Settings")
                 .selected(self.page == Page::Settings)
+                .toggled(self.page == Page::Settings)
                 .on_click(cx.listener(|this, _, _, cx| this.select_page(Page::Settings, cx))),
         )
     }
@@ -900,12 +979,128 @@ impl Workspace {
             Page::Jumpers => self.render_hosts(config, cx).into_any_element(),
             Page::Tunnels => self.render_tunnels(config, cx).into_any_element(),
             Page::Groups => self.render_groups(config, cx).into_any_element(),
-            Page::Logs => div()
-                .p_6()
-                .child("No runtime events yet")
-                .into_any_element(),
+            Page::Logs => self.render_logs(cx),
             Page::Settings => self.render_settings(directory, config, cx),
         }
+    }
+
+    fn render_logs(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let query = self.log_search.read(cx).value().trim().to_ascii_lowercase();
+        let matches = |event: &LogEvent| {
+            self.log_filter.matches(event)
+                && (query.is_empty()
+                    || event.subject.to_ascii_lowercase().contains(&query)
+                    || event.stage.to_ascii_lowercase().contains(&query)
+                    || event.message.to_ascii_lowercase().contains(&query))
+        };
+        let total = self.logs.iter().filter(|event| matches(event)).count();
+        let start = self.page_index.saturating_mul(PAGE_SIZE);
+        let mut filters = div().flex().flex_wrap().gap_1();
+        for filter in [
+            LogFilter::All,
+            LogFilter::Debug,
+            LogFilter::Info,
+            LogFilter::Warning,
+            LogFilter::Error,
+            LogFilter::Tunnel,
+            LogFilter::Host,
+        ] {
+            filters = filters.child(
+                Button::new(format!("log-filter-{}", filter.label()))
+                    .label(filter.label())
+                    .selected(self.log_filter == filter)
+                    .toggled(self.log_filter == filter)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.log_filter = filter;
+                        this.page_index = 0;
+                        cx.notify();
+                    })),
+            );
+        }
+        let mut rows = div().flex().flex_col().gap_1();
+        for (index, event) in self
+            .logs
+            .iter()
+            .rev()
+            .filter(|event| matches(event))
+            .skip(start)
+            .take(PAGE_SIZE)
+            .enumerate()
+        {
+            let time = event.timestamp_unix % 86_400;
+            let level = match event.level {
+                LogLevel::Debug => "DEBUG",
+                LogLevel::Info => "INFO",
+                LogLevel::Warning => "WARN",
+                LogLevel::Error => "ERROR",
+            };
+            rows = rows.child(
+                div()
+                    .id(format!("log-row-{}", start + index))
+                    .test_support()
+                    .aria_label(format!(
+                        "{} {} {} {}",
+                        level, event.subject, event.stage, event.message
+                    ))
+                    .px_2()
+                    .py_1()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(format!(
+                        "{:02}:{:02}:{:02} UTC  {level}  {}  {}  {}",
+                        time / 3600,
+                        (time / 60) % 60,
+                        time % 60,
+                        event.subject,
+                        event.stage,
+                        event.message
+                    )),
+            );
+        }
+        div()
+            .p_6()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child(filters)
+            .child("Search events")
+            .child(Input::new(&self.log_search).id("log-search"))
+            .child(if total == 0 {
+                "No matching runtime events"
+            } else {
+                "Recent runtime events (newest first)"
+            })
+            .child(rows)
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(format!(
+                        "{}–{} of {}",
+                        if total == 0 { 0 } else { start + 1 },
+                        (start + PAGE_SIZE).min(total),
+                        total
+                    ))
+                    .child(
+                        Button::new("logs-previous")
+                            .label("Previous")
+                            .disabled(start == 0)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.page_index = this.page_index.saturating_sub(1);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new("logs-next")
+                            .label("Next")
+                            .disabled(start + PAGE_SIZE >= total)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.page_index += 1;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_settings(
@@ -1693,12 +1888,25 @@ impl Workspace {
                 .flex_col()
                 .gap_1()
                 .child(tunnel.name.clone())
-                .child(format!(
-                    "{mode} · {}:{} · {label}",
-                    tunnel.local.host, tunnel.local.port
-                ));
+                .child(
+                    div()
+                        .id(format!("tunnel-status-{}", tunnel.id.0))
+                        .test_support()
+                        .aria_label(format!("{} {label}", tunnel.name))
+                        .child(format!(
+                            "{mode} · {}:{} · {label}",
+                            tunnel.local.host, tunnel.local.port
+                        )),
+                );
             if let Some(details) = details {
-                info = info.child(div().text_color(cx.theme().muted_foreground).child(details));
+                info = info.child(
+                    div()
+                        .id(format!("tunnel-details-{}", tunnel.id.0))
+                        .test_support()
+                        .aria_label(details.clone())
+                        .text_color(cx.theme().muted_foreground)
+                        .child(details),
+                );
             }
             rows = rows.child(
                 div()
@@ -1790,19 +1998,18 @@ fn input_row(
         .flex_col()
         .gap_1()
         .child(label)
-        .child(Input::new(input))
+        .child(Input::new(input).id(label))
 }
 
 fn password_row(
     label: &'static str,
     input: &gpui_kit::Entity<gpui_kit::component::input::InputState>,
 ) -> impl IntoElement {
-    div()
-        .flex()
-        .flex_col()
-        .gap_1()
-        .child(label)
-        .child(Input::new(input).content_type(InputContentType::Password))
+    div().flex().flex_col().gap_1().child(label).child(
+        Input::new(input)
+            .id(label)
+            .content_type(InputContentType::Password),
+    )
 }
 
 fn state_label(state: &SupervisorState) -> &'static str {
@@ -1868,6 +2075,15 @@ mod ui_tests {
     use super::*;
     use gpui_kit::TestAppContext;
     use gpui_kit::test::TestWindowExt;
+    use std::{collections::VecDeque, net::SocketAddr, time::Duration};
+    use tunnel_domain::{LocalEndpoint, RetryPolicy, TunnelConfig};
+
+    struct NoCredentials;
+    impl tunnel_core::CredentialSource for NoCredentials {
+        fn load(&self, _: &SecretRef) -> Result<zeroize::Zeroizing<String>, String> {
+            Err("no credentials".into())
+        }
+    }
 
     #[gpui_kit::test]
     fn sidebar_opens_group_editor_and_cancel_restores_list(cx: &mut TestAppContext) {
@@ -1901,6 +2117,10 @@ mod ui_tests {
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("Tunnels", cx);
             window.click("new-tunnel", cx);
+            window.click("Name", cx);
+            window.input("Demo SOCKS", cx);
+            assert_eq!(window.find("Name").focused(), Some(true));
+            assert_eq!(window.find("Name").value(), Some("Demo SOCKS"));
             assert!(window.find("mode-Dynamic SOCKS5").visible());
             window.click("mode-Local", cx);
             window.click("mode-Remote", cx);
@@ -1917,11 +2137,35 @@ mod ui_tests {
             window.click("Settings", cx);
             assert!(window.find("import-ssh-config").visible());
             assert!(window.find("run-at-login").visible());
+            assert_eq!(
+                window.find("run-at-login").label(),
+                Some("Launch at Windows login: off")
+            );
+            window.click("close-mode", cx);
         })
         .expect("workspace window");
         cx.update(|app| {
             handle
+                .update(app, |view, _, _| {
+                    assert_eq!(
+                        view.command_error.as_deref(),
+                        Some("Tunnel runtime is unavailable")
+                    );
+                })
+                .expect("settings interaction");
+        });
+        let (closed_manager, manager_handle) = tunnel_core::TunnelManager::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Arc::new(NoCredentials),
+        )
+        .expect("test manager");
+        drop(closed_manager);
+        cx.update(|app| {
+            handle
                 .update(app, |view, _, cx| {
+                    view.manager = Some(manager_handle);
                     view.host_key_prompts = Arc::new(vec![HostKeyPromptView {
                         id: 7,
                         host: "example.test".into(),
@@ -1938,7 +2182,190 @@ mod ui_tests {
             assert!(window.find("trust-once-7").visible());
             assert!(window.find("trust-save-7").visible());
             assert!(window.find("trust-cancel-7").visible());
+            window.click("trust-once-7", cx);
         })
         .expect("workspace window");
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, _| {
+                    assert_eq!(
+                        view.command_error.as_deref(),
+                        Some("Tunnel manager has stopped")
+                    );
+                })
+                .expect("host key action");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn blocked_reconnecting_and_sidebar_states_are_visible(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut config = ConfigDocument::default()
+            .into_domain()
+            .expect("default config");
+        let id = TunnelId("demo".into());
+        config.tunnels.push(TunnelConfig {
+            id: id.clone(),
+            name: "Demo".into(),
+            group_id: None,
+            mode: TunnelMode::Dynamic,
+            jump_chain: Vec::new(),
+            local: LocalEndpoint {
+                host: "127.0.0.1".into(),
+                port: 1080,
+            },
+            remote: None,
+            auto_start: false,
+            reconnect: RetryPolicy::default(),
+            description: String::new(),
+        });
+        let handle = cx.add_window(move |window, cx| {
+            Workspace::new(Ok((PathBuf::new(), config)), None, None, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            for page in ["Jumpers", "Groups", "Overview", "Tunnels"] {
+                window.click(page, cx);
+                assert!(window.find(page).visible());
+            }
+        })
+        .expect("sidebar navigation");
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, _| assert_eq!(view.page, Page::Tunnels))
+                .expect("selected page");
+        });
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, cx| {
+                    view.snapshot = Arc::new(ManagerSnapshot::from([(
+                        id.clone(),
+                        tunnel_core::TunnelView {
+                            state: SupervisorState::Blocked {
+                                reason: "host key rejected".into(),
+                            },
+                            local_addr: None,
+                        },
+                    )]));
+                    cx.notify();
+                })
+                .expect("blocked snapshot");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("tunnel-status-demo").label(),
+                Some("Demo Blocked")
+            );
+            assert_eq!(
+                window.find("tunnel-details-demo").label(),
+                Some("host key rejected")
+            );
+            assert_eq!(window.find("demo-action").label(), Some("Retry"));
+        })
+        .expect("blocked UI");
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, cx| {
+                    view.snapshot = Arc::new(ManagerSnapshot::from([(
+                        id,
+                        tunnel_core::TunnelView {
+                            state: SupervisorState::Reconnecting {
+                                attempt: 2,
+                                delay: Duration::from_secs(3),
+                                reason: "network unavailable".into(),
+                            },
+                            local_addr: Some(SocketAddr::from(([127, 0, 0, 1], 1080))),
+                        },
+                    )]));
+                    cx.notify();
+                })
+                .expect("reconnecting snapshot");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert_eq!(
+                window.find("tunnel-status-demo").label(),
+                Some("Demo Reconnecting")
+            );
+            assert!(
+                window
+                    .find("tunnel-details-demo")
+                    .label()
+                    .expect("details")
+                    .contains("Local listener remains reserved")
+            );
+            assert_eq!(window.find("demo-action").label(), Some("Stop"));
+        })
+        .expect("reconnecting UI");
+    }
+
+    #[gpui_kit::test]
+    fn logs_filter_and_search_change_visible_rows(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let config = ConfigDocument::default()
+            .into_domain()
+            .expect("default config");
+        let handle = cx.add_window(move |window, cx| {
+            Workspace::new(Ok((PathBuf::new(), config)), None, None, window, cx)
+        });
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, cx| {
+                    view.logs = Arc::new(VecDeque::from([
+                        Arc::new(LogEvent {
+                            timestamp_unix: 0,
+                            level: LogLevel::Info,
+                            source: LogSource::Tunnel,
+                            subject: "alpha".into(),
+                            stage: "Lifecycle",
+                            message: "Connected",
+                        }),
+                        Arc::new(LogEvent {
+                            timestamp_unix: 1,
+                            level: LogLevel::Error,
+                            source: LogSource::Host,
+                            subject: "beta".into(),
+                            stage: "Host key",
+                            message: "Confirmation required",
+                        }),
+                    ]));
+                    cx.notify();
+                })
+                .expect("log snapshot");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("Logs", cx);
+            assert!(window.find("log-row-1").visible());
+            window.click("log-filter-Error", cx);
+            assert!(
+                window
+                    .find("log-row-0")
+                    .label()
+                    .expect("row label")
+                    .contains("beta")
+            );
+            assert!(window.try_find("log-row-1").is_none());
+            window.click("log-filter-Tunnel", cx);
+            assert!(
+                window
+                    .find("log-row-0")
+                    .label()
+                    .expect("row label")
+                    .contains("alpha")
+            );
+            window.click("log-search", cx);
+            window.input("missing", cx);
+            assert_eq!(window.find("log-search").focused(), Some(true));
+            assert!(window.try_find("log-row-0").is_none());
+        })
+        .expect("logs UI");
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, _| {
+                    assert_eq!(view.page, Page::Logs);
+                    assert_eq!(view.log_filter, LogFilter::Tunnel);
+                })
+                .expect("log filter state");
+        });
     }
 }

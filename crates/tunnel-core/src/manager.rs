@@ -1,9 +1,9 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use config_store::{
@@ -35,6 +35,7 @@ const MAX_TUNNELS: usize = 1024;
 const COMMAND_CAPACITY: usize = 128;
 const STOP_DEADLINE: Duration = Duration::from_secs(3);
 const MAX_HOST_KEY_PROMPTS: usize = 16;
+const MAX_LOG_EVENTS: usize = 500;
 
 /// Blocking OS credential-store access. The manager always invokes this on a
 /// Tokio blocking worker and never retains plaintext beyond one SSH attempt.
@@ -49,6 +50,32 @@ pub struct TunnelView {
 }
 
 pub type ManagerSnapshot = HashMap<TunnelId, TunnelView>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+    Debug,
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogSource {
+    Tunnel,
+    Host,
+}
+
+#[derive(Debug)]
+pub struct LogEvent {
+    pub timestamp_unix: u64,
+    pub level: LogLevel,
+    pub source: LogSource,
+    pub subject: String,
+    pub stage: &'static str,
+    pub message: &'static str,
+}
+
+pub type LogSnapshot = VecDeque<Arc<LogEvent>>;
 
 #[derive(Clone, Debug)]
 pub struct HostKeyPromptView {
@@ -114,6 +141,7 @@ pub struct ManagerHandle {
     snapshots: watch::Receiver<Arc<ManagerSnapshot>>,
     host_keys: watch::Receiver<Arc<Vec<HostKeyPromptView>>>,
     config: watch::Receiver<Arc<DomainConfig>>,
+    logs: watch::Receiver<Arc<LogSnapshot>>,
     shutdown: CancellationToken,
 }
 
@@ -136,6 +164,10 @@ impl ManagerHandle {
     }
     pub fn subscribe_config(&self) -> watch::Receiver<Arc<DomainConfig>> {
         self.config.clone()
+    }
+
+    pub fn subscribe_logs(&self) -> watch::Receiver<Arc<LogSnapshot>> {
+        self.logs.clone()
     }
 
     pub fn shutdown(&self) {
@@ -165,6 +197,8 @@ pub struct TunnelManager {
     commands: mpsc::Receiver<CoreCommand>,
     snapshots: watch::Sender<Arc<ManagerSnapshot>>,
     current: ManagerSnapshot,
+    logs: LogSnapshot,
+    log_views: watch::Sender<Arc<LogSnapshot>>,
     active: HashMap<TunnelId, ActiveTunnel>,
     shutdown: CancellationToken,
     auto_start: Vec<TunnelId>,
@@ -209,6 +243,7 @@ impl TunnelManager {
         }
         let (commands_tx, commands_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (snapshots_tx, snapshots_rx) = watch::channel(Arc::new(current.clone()));
+        let (log_views, log_rx) = watch::channel(Arc::new(LogSnapshot::new()));
         let (host_key_sender, host_key_requests) = mpsc::channel(MAX_HOST_KEY_PROMPTS);
         let (host_key_views, host_key_rx) = watch::channel(Arc::new(Vec::new()));
         let (config_views, config_rx) = watch::channel(Arc::new(DomainConfig {
@@ -227,6 +262,8 @@ impl TunnelManager {
                 commands: commands_rx,
                 snapshots: snapshots_tx,
                 current,
+                logs: LogSnapshot::new(),
+                log_views,
                 active: HashMap::new(),
                 shutdown: shutdown.clone(),
                 auto_start,
@@ -242,6 +279,7 @@ impl TunnelManager {
             ManagerHandle {
                 commands: commands_tx,
                 snapshots: snapshots_rx,
+                logs: log_rx,
                 host_keys: host_key_rx,
                 config: config_rx,
                 shutdown,
@@ -385,6 +423,16 @@ impl TunnelManager {
             view,
             reply: prompt.reply,
         });
+        if let Some(pending) = self.pending_host_keys.last() {
+            let host = pending.view.host.clone();
+            self.push_log(
+                LogLevel::Warning,
+                LogSource::Host,
+                host,
+                "Host key",
+                "Confirmation required",
+            );
+        }
         self.publish_host_keys();
     }
 
@@ -699,11 +747,15 @@ impl TunnelManager {
             self.publish_host_keys();
         }
         let mut changed = false;
+        let mut transitions = Vec::new();
         let mut finished = Vec::new();
         for (id, active) in &mut self.active {
             if active.state.has_changed().unwrap_or(false) {
                 let state = active.state.borrow_and_update().clone();
                 if let Some(view) = self.current.get_mut(id) {
+                    if std::mem::discriminant(&view.state) != std::mem::discriminant(&state) {
+                        transitions.push((id.clone(), state.clone()));
+                    }
                     view.state = state;
                     changed = true;
                 }
@@ -723,9 +775,13 @@ impl TunnelManager {
                 if let Some(view) = self.current.get_mut(&id) {
                     view.state = SupervisorState::Blocked { reason };
                     view.local_addr = None;
+                    transitions.push((id.clone(), view.state.clone()));
                     changed = true;
                 }
             }
+        }
+        for (id, state) in transitions {
+            self.log_state(&id, &state);
         }
         if changed {
             self.publish();
@@ -734,9 +790,56 @@ impl TunnelManager {
 
     fn set_state(&mut self, id: &TunnelId, state: SupervisorState, local_addr: Option<SocketAddr>) {
         if let Some(view) = self.current.get_mut(id) {
+            let changed = std::mem::discriminant(&view.state) != std::mem::discriminant(&state);
             *view = TunnelView { state, local_addr };
+            if changed {
+                let state = self.current.get(id).map(|view| view.state.clone());
+                if let Some(state) = state {
+                    self.log_state(id, &state);
+                }
+            }
             self.publish();
         }
+    }
+
+    fn log_state(&mut self, id: &TunnelId, state: &SupervisorState) {
+        let (level, message) = match state {
+            SupervisorState::Stopped => (LogLevel::Info, "Stopped"),
+            SupervisorState::Connecting { .. } => (LogLevel::Info, "Connecting to SSH host"),
+            SupervisorState::Healthy { .. } => (LogLevel::Info, "SSH connection healthy"),
+            SupervisorState::Degraded { .. } => (LogLevel::Warning, "SSH connection degraded"),
+            SupervisorState::Reconnecting { .. } => (LogLevel::Warning, "Reconnecting"),
+            SupervisorState::Blocked { .. } => (
+                LogLevel::Error,
+                "Tunnel blocked; inspect status for details",
+            ),
+        };
+        self.push_log(level, LogSource::Tunnel, id.0.clone(), "Lifecycle", message);
+    }
+
+    fn push_log(
+        &mut self,
+        level: LogLevel,
+        source: LogSource,
+        subject: String,
+        stage: &'static str,
+        message: &'static str,
+    ) {
+        if self.logs.len() == MAX_LOG_EVENTS {
+            self.logs.pop_front();
+        }
+        self.logs.push_back(Arc::new(LogEvent {
+            timestamp_unix: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            level,
+            source,
+            subject,
+            stage,
+            message,
+        }));
+        self.log_views.send_replace(Arc::new(self.logs.clone()));
     }
 
     fn publish(&self) {
@@ -845,6 +948,34 @@ mod config_tests {
         fn load(&self, _: &SecretRef) -> Result<Zeroizing<String>, String> {
             Err("no credentials configured".into())
         }
+    }
+
+    #[test]
+    fn runtime_event_history_evicts_old_entries() {
+        let (mut manager, handle) = TunnelManager::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        for index in 0..=MAX_LOG_EVENTS {
+            manager.push_log(
+                LogLevel::Info,
+                LogSource::Tunnel,
+                index.to_string(),
+                "Lifecycle",
+                "Connected",
+            );
+        }
+        let logs = handle.subscribe_logs();
+        let snapshot = logs.borrow();
+        assert_eq!(snapshot.len(), MAX_LOG_EVENTS);
+        assert_eq!(snapshot.front().expect("oldest event").subject, "1");
+        assert_eq!(
+            snapshot.back().expect("newest event").subject,
+            MAX_LOG_EVENTS.to_string()
+        );
     }
 
     #[test]

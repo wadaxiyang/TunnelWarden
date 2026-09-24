@@ -81,8 +81,8 @@ async fn stop_during_reconnect_releases_the_owned_listener() {
     .expect("reconnecting deadline");
     assert!(TcpListener::bind(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port)).is_err());
     handle
-        .try_send(CoreCommand::RetryTunnel(id.clone()))
-        .expect("retry command");
+        .try_send(CoreCommand::NetworkRecovered)
+        .expect("network recovery command");
     timeout(Duration::from_secs(3), async {
         loop {
             if matches!(

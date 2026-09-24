@@ -4,6 +4,8 @@ use std::{
     thread::{self, JoinHandle},
 };
 
+#[cfg(windows)]
+use config_store::set_run_at_login;
 use config_store::{DomainConfig, SecretStore};
 use gpui_kit::Global;
 use tunnel_core::{CredentialSource, ManagerHandle, TunnelManager};
@@ -34,6 +36,8 @@ impl Global for RuntimeHost {}
 
 impl RuntimeHost {
     pub fn new(config: DomainConfig, directory: PathBuf) -> Result<Self, String> {
+        #[cfg(windows)]
+        let refresh_login = config.app.run_at_startup;
         let (manager, handle) = TunnelManager::new(
             config.hosts,
             config.groups,
@@ -51,7 +55,13 @@ impl RuntimeHost {
             .map_err(|error| error.to_string())?;
         let thread = thread::Builder::new()
             .name("tunnelwarden-host".into())
-            .spawn(move || runtime.block_on(manager.run()))
+            .spawn(move || {
+                #[cfg(windows)]
+                if refresh_login && let Err(error) = set_run_at_login(true) {
+                    eprintln!("Could not refresh Windows login startup command: {error}");
+                }
+                runtime.block_on(manager.run());
+            })
             .map_err(|error| error.to_string())?;
         #[cfg(windows)]
         let network = match NetworkWatcher::new(handle.clone()) {

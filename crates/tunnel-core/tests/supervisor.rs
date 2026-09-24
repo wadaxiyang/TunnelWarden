@@ -205,9 +205,18 @@ async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
             } else {
                 Duration::from_secs(60)
             };
-            for _ in 0..checks {
+            for check in 0..checks {
                 tokio::time::sleep(interval).await;
                 assert_traffic(local_address, b"periodic soak traffic", true).await;
+                if !soak_smoke && (check + 1) % 10 == 0 {
+                    eprintln!(
+                        "soak hour {}/{}: {}/{} traffic checks passed",
+                        cycle + 1,
+                        reconnect_cycles,
+                        check + 1,
+                        checks
+                    );
+                }
             }
         }
         disconnect.send(()).await.expect("disconnect signal");
@@ -217,6 +226,13 @@ async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
             "listener was released during reconnect {cycle}"
         );
         wait_for_healthy(&mut state).await;
+        if soak_mode {
+            eprintln!(
+                "soak hour {}/{}: reconnect healthy",
+                cycle + 1,
+                reconnect_cycles
+            );
+        }
         if cycle % 100 == 0 || cycle + 1 == reconnect_cycles {
             assert_traffic(local_address, b"after reconnect", soak_mode).await;
         }
