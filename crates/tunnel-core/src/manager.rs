@@ -8,7 +8,7 @@ use std::{
 
 use config_store::{
     AppSettings, ConfigDocument, ConfigStore, DomainConfig, SecretStore, SshImportPreview,
-    preview_ssh_config,
+    preview_ssh_config, set_run_at_login,
 };
 use ssh_engine::{
     HopSpec, HostKeyApproval, HostKeyDecision, HostKeyPrompt, SshChain, SshChainError,
@@ -22,7 +22,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tunnel_domain::{
-    AuthConfig, SecretRef, SshHost, TunnelConfig, TunnelGroup, TunnelId, TunnelMode,
+    AuthConfig, GroupId, SecretRef, SshHost, TunnelConfig, TunnelGroup, TunnelId, TunnelMode,
 };
 use zeroize::Zeroizing;
 
@@ -62,6 +62,8 @@ pub struct HostKeyPromptView {
 pub enum CoreCommand {
     StartAll,
     StopAll,
+    StartGroup(GroupId),
+    StopGroup(GroupId),
     StartTunnel(TunnelId),
     StopTunnel(TunnelId),
     RestartTunnel(TunnelId),
@@ -281,6 +283,18 @@ impl TunnelManager {
                         let ids: Vec<_> = self.active.keys().cloned().collect();
                         for id in ids { self.stop(&id).await; }
                     }
+                    Some(CoreCommand::StartGroup(group)) => {
+                        let ids: Vec<_> = self.tunnels.iter()
+                            .filter(|(_, tunnel)| tunnel.group_id.as_ref() == Some(&group))
+                            .map(|(id, _)| id.clone()).collect();
+                        for id in ids { self.start(&id).await; }
+                    }
+                    Some(CoreCommand::StopGroup(group)) => {
+                        let ids: Vec<_> = self.tunnels.iter()
+                            .filter(|(_, tunnel)| tunnel.group_id.as_ref() == Some(&group))
+                            .map(|(id, _)| id.clone()).collect();
+                        for id in ids { self.stop(&id).await; }
+                    }
                     Some(CoreCommand::StartTunnel(id)) => self.start(&id).await,
                     Some(CoreCommand::StopTunnel(id)) => self.stop(&id).await,
                     Some(CoreCommand::RestartTunnel(id)) => {
@@ -304,7 +318,8 @@ impl TunnelManager {
                         }
                     }
                     Some(CoreCommand::SaveConfig { directory, config, secret, reply }) => {
-                        let result = Self::persist_config(directory, config.clone(), secret).await;
+                        let old_run_at_login = self.config_views.borrow().app.run_at_startup;
+                        let result = Self::persist_config(directory, config.clone(), secret, old_run_at_login).await;
                         if result.is_ok() {
                             self.replace_config(config).await;
                         }
@@ -386,18 +401,35 @@ impl TunnelManager {
         directory: PathBuf,
         config: DomainConfig,
         secret: Option<SecretUpdate>,
+        old_run_at_login: bool,
     ) -> Result<(), String> {
         tokio::task::spawn_blocking(move || {
+            let run_at_login = config.app.run_at_startup;
             let document = ConfigDocument::try_from(config).map_err(|error| error.to_string())?;
             if let Some(secret) = &secret {
                 SecretStore::save(&secret.reference, &secret.value)
                     .map_err(|error| error.to_string())?;
+            }
+            if run_at_login != old_run_at_login
+                && let Err(error) = set_run_at_login(run_at_login)
+            {
+                if let Some(secret) = &secret {
+                    let _ = SecretStore::delete(&secret.reference);
+                }
+                return Err(error.to_string());
             }
             match ConfigStore::new(directory).save(document) {
                 Ok(()) => Ok(()),
                 Err(error) => {
                     if let Some(secret) = &secret {
                         let _ = SecretStore::delete(&secret.reference);
+                    }
+                    if run_at_login != old_run_at_login
+                        && let Err(rollback) = set_run_at_login(old_run_at_login)
+                    {
+                        return Err(format!(
+                            "{error}; could not restore login startup setting: {rollback}"
+                        ));
                     }
                     Err(error.to_string())
                 }
@@ -424,10 +456,12 @@ impl TunnelManager {
                 let Some(new) = updated.get(*id) else {
                     return true;
                 };
-                old != new
+                !same_tunnel_runtime(old, new)
                     || old.jump_chain.iter().any(|hop| {
-                        self.hosts.iter().find(|host| &host.id == hop)
-                            != config.hosts.iter().find(|host| &host.id == hop)
+                        !same_host_connection(
+                            self.hosts.iter().find(|host| &host.id == hop),
+                            config.hosts.iter().find(|host| &host.id == hop),
+                        )
                     })
             })
             .cloned()
@@ -774,17 +808,70 @@ async fn load_secret(
         })
 }
 
+fn same_tunnel_runtime(old: &TunnelConfig, new: &TunnelConfig) -> bool {
+    old.mode == new.mode
+        && old.jump_chain == new.jump_chain
+        && old.local == new.local
+        && old.remote == new.remote
+        && old.reconnect == new.reconnect
+}
+
+fn same_host_connection(old: Option<&SshHost>, new: Option<&SshHost>) -> bool {
+    match (old, new) {
+        (Some(old), Some(new)) => {
+            old.hostname == new.hostname
+                && old.port == new.port
+                && old.username == new.username
+                && old.auth == new.auth
+                && old.host_key_policy == new.host_key_policy
+                && old.connect_timeout == new.connect_timeout
+                && old.keepalive_interval == new.keepalive_interval
+                && old.keepalive_max == new.keepalive_max
+        }
+        (None, None) => true,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod config_tests {
     use super::*;
     use config_store::AppSettings;
     use tempfile::TempDir;
+    use tunnel_domain::{LocalEndpoint, RetryPolicy};
 
     struct EmptyCredentials;
     impl CredentialSource for EmptyCredentials {
         fn load(&self, _: &SecretRef) -> Result<Zeroizing<String>, String> {
             Err("no credentials configured".into())
         }
+    }
+
+    #[test]
+    fn group_and_label_edits_preserve_a_running_tunnel() {
+        let old = TunnelConfig {
+            id: TunnelId("one".into()),
+            name: "one".into(),
+            group_id: None,
+            mode: TunnelMode::Dynamic,
+            jump_chain: vec![],
+            local: LocalEndpoint {
+                host: "127.0.0.1".into(),
+                port: 1080,
+            },
+            remote: None,
+            auto_start: false,
+            reconnect: RetryPolicy::default(),
+            description: String::new(),
+        };
+        let mut edited = old.clone();
+        edited.name = "renamed".into();
+        edited.group_id = Some(GroupId("other".into()));
+        edited.auto_start = true;
+        edited.description = "notes".into();
+        assert!(same_tunnel_runtime(&old, &edited));
+        edited.local.port = 1081;
+        assert!(!same_tunnel_runtime(&old, &edited));
     }
 
     #[tokio::test]

@@ -19,16 +19,16 @@ three-hop Jump Chains; bounded reconnect supervisors; and SSH session health
 checks. Integration tests use an in-process SSH server and exercise bytes over
 forwarded channels, reconnect, host-key approval and listener release.
 
-The Windows GPUI Kit app has structured jumper and tunnel editors, a tray,
+The Windows GPUI Kit app has structured jumper, tunnel and group editors, a tray,
 single-instance wakeup, network change notifications, versioned TOML storage,
-OS keyring-backed secrets, and import/export with previews. OpenSSH config
+Windows login startup, OS keyring-backed secrets, and import/export with previews. OpenSSH config
 import previews supported fields, conflicts and unmapped directives before
 adding jumpers. The `ProxyJump` directive is shown as a warning because imported
 jumpers do not automatically become tunnel Jump Chains.
 
 This is still an internal development build. The full v1.0 gates in
-[TunnelWarden_SPEC.md](TunnelWarden_SPEC.md) include a 24-hour soak, 1000 real
-reconnects, UI interaction checks, startup integration and an audit review.
+[TunnelWarden_SPEC.md](TunnelWarden_SPEC.md) include a 24-hour soak, UI
+interaction checks, physical network and login tests, and an audit review.
 Passing a shorter test does not imply those gates have passed.
 
 ## Local checks

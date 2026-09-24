@@ -8,12 +8,13 @@ use gpui_kit::base::{Disableable, Selectable, StyledExt};
 use gpui_kit::component::{
     ActiveTheme,
     button::{Button, ButtonVariants},
-    input::{Input, InputContentType},
+    input::{Input, InputContentType, InputState},
     scroll::ScrollableElement,
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
-    AsyncApp, Context, IntoElement, ParentElement as _, PathPromptOptions, Render, Styled as _,
-    Task, Window, div, rems,
+    AppContext as _, AsyncApp, Context, Entity, IntoElement, ParentElement as _, PathPromptOptions,
+    Render, Styled as _, Task, Window, div, rems,
 };
 use tokio::sync::oneshot;
 use tunnel_core::{
@@ -21,7 +22,7 @@ use tunnel_core::{
     SupervisorState,
 };
 use tunnel_domain::TunnelMode;
-use tunnel_domain::{AuthConfig, HostId, HostKeyPolicy, SecretRef, TunnelId};
+use tunnel_domain::{AuthConfig, GroupId, HostId, HostKeyPolicy, SecretRef, TunnelGroup, TunnelId};
 
 use crate::editor::{Editor, HostEditor, TunnelEditor};
 
@@ -32,6 +33,7 @@ enum Page {
     Overview,
     Jumpers,
     Tunnels,
+    Groups,
     Logs,
     Settings,
 }
@@ -42,10 +44,16 @@ impl Page {
             Self::Overview => "Overview",
             Self::Jumpers => "Jumpers",
             Self::Tunnels => "Tunnels",
+            Self::Groups => "Groups",
             Self::Logs => "Logs",
             Self::Settings => "Settings",
         }
     }
+}
+
+struct GroupEditor {
+    id: GroupId,
+    name: Entity<InputState>,
 }
 
 pub struct Workspace {
@@ -60,6 +68,8 @@ pub struct Workspace {
     _host_key_updates: Option<Task<()>>,
     host_key_prompts: Arc<Vec<HostKeyPromptView>>,
     editor: Option<Editor>,
+    group_editor: Option<GroupEditor>,
+    pending_group_delete: Option<GroupId>,
     saving: bool,
     _save_task: Option<Task<()>>,
     _file_task: Option<Task<()>>,
@@ -134,6 +144,8 @@ impl Workspace {
             _host_key_updates: host_key_updates,
             host_key_prompts,
             editor: None,
+            group_editor: None,
+            pending_group_delete: None,
             saving: false,
             _save_task: None,
             _file_task: None,
@@ -157,7 +169,9 @@ impl Workspace {
             }
             n += 1;
         };
-        self.editor = Some(Editor::Host(HostEditor::new(id, None, window, cx)));
+        self.editor = Some(Editor::Host(Box::new(HostEditor::new(
+            id, None, window, cx,
+        ))));
         cx.notify();
     }
 
@@ -170,12 +184,12 @@ impl Workspace {
         else {
             return;
         };
-        self.editor = Some(Editor::Host(HostEditor::new(
+        self.editor = Some(Editor::Host(Box::new(HostEditor::new(
             id.clone(),
             Some(host),
             window,
             cx,
-        )));
+        ))));
         cx.notify();
     }
 
@@ -191,7 +205,9 @@ impl Workspace {
             }
             n += 1;
         };
-        self.editor = Some(Editor::Tunnel(TunnelEditor::new(id, None, window, cx)));
+        self.editor = Some(Editor::Tunnel(Box::new(TunnelEditor::new(
+            id, None, window, cx,
+        ))));
         cx.notify();
     }
 
@@ -204,13 +220,124 @@ impl Workspace {
         else {
             return;
         };
-        self.editor = Some(Editor::Tunnel(TunnelEditor::new(
+        self.editor = Some(Editor::Tunnel(Box::new(TunnelEditor::new(
             id.clone(),
             Some(tunnel),
             window,
             cx,
-        )));
+        ))));
         cx.notify();
+    }
+
+    fn new_group(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok((_, config)) = &self.startup else {
+            return;
+        };
+        let mut number = config.groups.len() + 1;
+        let id = loop {
+            let id = GroupId(format!("group-{number}"));
+            if config.groups.iter().all(|group| group.id != id) {
+                break id;
+            }
+            number += 1;
+        };
+        self.group_editor = Some(GroupEditor {
+            id,
+            name: cx.new(|cx| InputState::new(window, cx)),
+        });
+        cx.notify();
+    }
+
+    fn edit_group(&mut self, id: &GroupId, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(group) = self
+            .startup
+            .as_ref()
+            .ok()
+            .and_then(|(_, config)| config.groups.iter().find(|group| &group.id == id))
+        else {
+            return;
+        };
+        self.group_editor = Some(GroupEditor {
+            id: id.clone(),
+            name: cx.new(|cx| InputState::new(window, cx).default_value(&group.name)),
+        });
+        cx.notify();
+    }
+
+    fn save_group(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        let (Some(editor), Ok((directory, current))) = (&self.group_editor, &self.startup) else {
+            return;
+        };
+        let name = editor.name.read(cx).value().to_string().trim().to_owned();
+        if name.is_empty() {
+            self.command_error = Some("Group name is required".into());
+            cx.notify();
+            return;
+        }
+        if current
+            .groups
+            .iter()
+            .any(|group| group.id != editor.id && group.name.eq_ignore_ascii_case(&name))
+        {
+            self.command_error = Some("A group with this name already exists".into());
+            cx.notify();
+            return;
+        }
+        let mut config = current.clone();
+        if let Some(group) = config.groups.iter_mut().find(|group| group.id == editor.id) {
+            group.name = name;
+        } else {
+            let order = config
+                .groups
+                .iter()
+                .map(|group| group.sort_order)
+                .max()
+                .unwrap_or(0)
+                .saturating_add(1);
+            config.groups.push(TunnelGroup {
+                id: editor.id.clone(),
+                name,
+                sort_order: order,
+            });
+        }
+        self.persist_config(directory.clone(), config, None, cx);
+    }
+
+    fn delete_group(&mut self, id: &GroupId, cx: &mut Context<Self>) {
+        let Ok((directory, current)) = &self.startup else {
+            return;
+        };
+        let mut config = current.clone();
+        config.groups.retain(|group| &group.id != id);
+        for tunnel in &mut config.tunnels {
+            if tunnel.group_id.as_ref() == Some(id) {
+                tunnel.group_id = None;
+            }
+        }
+        self.persist_config(directory.clone(), config, None, cx);
+    }
+
+    fn move_group(&mut self, id: &GroupId, direction: isize, cx: &mut Context<Self>) {
+        let Ok((directory, current)) = &self.startup else {
+            return;
+        };
+        let mut config = current.clone();
+        config.groups.sort_by_key(|group| group.sort_order);
+        let Some(index) = config.groups.iter().position(|group| &group.id == id) else {
+            return;
+        };
+        let target = index as isize + direction;
+        if target < 0 || target >= config.groups.len() as isize {
+            return;
+        }
+        config.groups.swap(index, target as usize);
+        for (order, group) in config.groups.iter_mut().enumerate() {
+            group.sort_order = order as u32;
+        }
+        self.persist_config(directory.clone(), config, None, cx);
     }
 
     fn save_editor(&mut self, cx: &mut Context<Self>) {
@@ -293,6 +420,8 @@ impl Workspace {
                     Ok(()) => {
                         view.startup = Ok((directory, config));
                         view.editor = None;
+                        view.group_editor = None;
+                        view.pending_group_delete = None;
                         view.import_preview = None;
                         view.ssh_preview = None;
                         view.command_error = None;
@@ -440,20 +569,37 @@ impl Workspace {
             if !selected {
                 continue;
             }
-            if entry.host.username.is_empty()
-                || config
-                    .hosts
-                    .iter()
-                    .any(|host| host.id == entry.host.id || host.name == entry.host.name)
-            {
-                self.command_error = Some(format!(
-                    "Resolve conflict or missing user for {}",
-                    entry.alias
-                ));
+            if entry.host.username.is_empty() {
+                self.command_error = Some(format!("Missing user for {}", entry.alias));
                 cx.notify();
                 return;
             }
-            config.hosts.push(entry.host.clone());
+            let mut host = entry.host.clone();
+            if config.hosts.iter().any(|existing| {
+                existing.id == host.id || existing.name.eq_ignore_ascii_case(&host.name)
+            }) {
+                let Some((id, name)) = (2..=1024)
+                    .map(|suffix| {
+                        (
+                            HostId(format!("{}-{suffix}", entry.host.id.0)),
+                            format!("{} ({suffix})", entry.host.name),
+                        )
+                    })
+                    .find(|(id, name)| {
+                        config.hosts.iter().all(|existing| {
+                            existing.id != *id && !existing.name.eq_ignore_ascii_case(name)
+                        })
+                    })
+                else {
+                    self.command_error =
+                        Some(format!("Could not find a unique name for {}", entry.alias));
+                    cx.notify();
+                    return;
+                };
+                host.id = id;
+                host.name = name;
+            }
+            config.hosts.push(host);
         }
         if let Err(error) =
             ConfigDocument::try_from(config.clone()).and_then(ConfigDocument::into_domain)
@@ -521,6 +667,9 @@ impl Workspace {
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
         self.page = page;
         self.page_index = 0;
+        self.editor = None;
+        self.group_editor = None;
+        self.pending_group_delete = None;
         cx.notify();
     }
 
@@ -531,6 +680,7 @@ impl Workspace {
         match self.page {
             Page::Jumpers => config.hosts.len(),
             Page::Tunnels => config.tunnels.len(),
+            Page::Groups => config.groups.len(),
             _ => 0,
         }
     }
@@ -547,7 +697,13 @@ impl Workspace {
             .border_r_1()
             .border_color(cx.theme().border)
             .child(div().px_2().py_3().font_semibold().child("TunnelWarden"));
-        for page in [Page::Overview, Page::Jumpers, Page::Tunnels, Page::Logs] {
+        for page in [
+            Page::Overview,
+            Page::Jumpers,
+            Page::Tunnels,
+            Page::Groups,
+            Page::Logs,
+        ] {
             sidebar = sidebar.child(
                 Button::new(page.title())
                     .ghost()
@@ -591,6 +747,7 @@ impl Workspace {
         };
         let body = match &self.startup {
             Ok((_, config)) if self.editor.is_some() => self.render_editor(config, cx),
+            Ok((_, _)) if self.group_editor.is_some() => self.render_group_editor(cx),
             Ok((directory, config)) => self.render_page(directory, config, cx),
             Err(error) => div()
                 .p_6()
@@ -742,6 +899,7 @@ impl Workspace {
             }
             Page::Jumpers => self.render_hosts(config, cx).into_any_element(),
             Page::Tunnels => self.render_tunnels(config, cx).into_any_element(),
+            Page::Groups => self.render_groups(config, cx).into_any_element(),
             Page::Logs => div()
                 .p_6()
                 .child("No runtime events yet")
@@ -763,6 +921,23 @@ impl Workspace {
             .gap_3()
             .child("Configuration folder")
             .child(directory.display().to_string())
+            .child(
+                Button::new("run-at-login")
+                    .label(if config.app.run_at_startup {
+                        "Launch at Windows login: on"
+                    } else {
+                        "Launch at Windows login: off"
+                    })
+                    .disabled(self.saving)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let Ok((directory, current)) = &this.startup else {
+                            return;
+                        };
+                        let mut config = current.clone();
+                        config.app.run_at_startup = !config.app.run_at_startup;
+                        this.persist_config(directory.clone(), config, None, cx);
+                    })),
+            )
             .child(
                 Button::new("close-mode")
                     .label(if config.app.minimize_to_tray {
@@ -863,7 +1038,7 @@ impl Workspace {
                     .any(|host| host.id == entry.host.id || host.name == entry.host.name);
                 let selected = self.ssh_selected.get(index).copied().unwrap_or(false);
                 let status = if conflict {
-                    "Duplicate"
+                    "Duplicate · rename on import"
                 } else if entry.host.username.is_empty() {
                     "Needs user"
                 } else if !entry.warnings.is_empty() {
@@ -877,9 +1052,15 @@ impl Workspace {
                         .gap_2()
                         .child(
                             Button::new(format!("ssh-import-{index}"))
-                                .label(if selected { "✓ Import" } else { "Skip" })
+                                .label(if selected {
+                                    "✓ Import"
+                                } else if conflict {
+                                    "Rename & add"
+                                } else {
+                                    "Skip"
+                                })
                                 .selected(selected)
-                                .disabled(conflict || entry.host.username.is_empty() || self.saving)
+                                .disabled(entry.host.username.is_empty() || self.saving)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if let Some(selected) = this.ssh_selected.get_mut(index) {
                                         *selected = !*selected;
@@ -1075,7 +1256,35 @@ impl Workspace {
                     .child(div().text_lg().font_semibold().child("Tunnel editor"))
                     .child(input_row("Name", &editor.name))
                     .child(input_row("Description", &editor.description))
-                    .child(div().font_semibold().child("Mode"));
+                    .child(div().font_semibold().child("Group"))
+                    .child(
+                        Button::new("group-ungrouped")
+                            .label("Ungrouped")
+                            .selected(editor.group_id.is_none())
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                if let Some(Editor::Tunnel(editor)) = &mut this.editor {
+                                    editor.group_id = None;
+                                    cx.notify();
+                                }
+                            })),
+                    );
+                let mut groups: Vec<_> = config.groups.iter().collect();
+                groups.sort_by_key(|group| group.sort_order);
+                for group in groups {
+                    let id = group.id.clone();
+                    form = form.child(
+                        Button::new(format!("group-option-{}", id.0))
+                            .label(group.name.clone())
+                            .selected(editor.group_id.as_ref() == Some(&id))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(Editor::Tunnel(editor)) = &mut this.editor {
+                                    editor.group_id = Some(id.clone());
+                                    cx.notify();
+                                }
+                            })),
+                    );
+                }
+                form = form.child(div().font_semibold().child("Mode"));
                 for (label, mode) in [
                     ("Local", TunnelMode::Local),
                     ("Remote", TunnelMode::Remote),
@@ -1251,6 +1460,150 @@ impl Workspace {
                 ),
         )
         .into_any_element()
+    }
+
+    fn render_group_editor(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
+        let Some(editor) = &self.group_editor else {
+            return div().into_any_element();
+        };
+        div()
+            .p_6()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .max_w(rems(32.))
+            .child(div().text_lg().font_semibold().child("Tunnel group"))
+            .child(input_row("Name", &editor.name))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new("save-group")
+                            .primary()
+                            .label("Save Group")
+                            .disabled(self.saving)
+                            .on_click(cx.listener(|this, _, _, cx| this.save_group(cx))),
+                    )
+                    .child(
+                        Button::new("cancel-group")
+                            .label("Cancel")
+                            .disabled(self.saving)
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.group_editor = None;
+                                cx.notify();
+                            })),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_groups(&self, config: &DomainConfig, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut groups: Vec<_> = config.groups.iter().collect();
+        groups.sort_by_key(|group| group.sort_order);
+        let start = self.page_index.saturating_mul(PAGE_SIZE);
+        let mut rows = div().flex().flex_col().gap_2();
+        for group in groups.into_iter().skip(start).take(PAGE_SIZE) {
+            let id = group.id.clone();
+            let tunnel_count = config
+                .tunnels
+                .iter()
+                .filter(|tunnel| tunnel.group_id.as_ref() == Some(&id))
+                .count();
+            let pending = self.pending_group_delete.as_ref() == Some(&id);
+            let edit_id = id.clone();
+            let start_id = id.clone();
+            let stop_id = id.clone();
+            let up_id = id.clone();
+            let down_id = id.clone();
+            let delete_id = id.clone();
+            rows = rows.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .p_3()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
+                    .child(format!("{} · {} tunnels", group.name, tunnel_count))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .child(
+                                Button::new(format!("group-edit-{}", id.0))
+                                    .label("Rename")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.edit_group(&edit_id, window, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("group-start-{}", id.0))
+                                    .label("Start All")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.request(CoreCommand::StartGroup(start_id.clone()), cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("group-stop-{}", id.0))
+                                    .label("Stop All")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.request(CoreCommand::StopGroup(stop_id.clone()), cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("group-up-{}", id.0))
+                                    .label("Up")
+                                    .disabled(self.saving)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.move_group(&up_id, -1, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("group-down-{}", id.0))
+                                    .label("Down")
+                                    .disabled(self.saving)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.move_group(&down_id, 1, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(format!("group-delete-{}", id.0))
+                                    .label(if pending { "Confirm delete" } else { "Delete" })
+                                    .disabled(self.saving)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        if this.pending_group_delete.as_ref() == Some(&delete_id) {
+                                            this.delete_group(&delete_id, cx);
+                                        } else {
+                                            this.pending_group_delete = Some(delete_id.clone());
+                                            cx.notify();
+                                        }
+                                    })),
+                            ),
+                    )
+                    .when(pending, |row| {
+                        row.child("Deleting this group moves its tunnels to Ungrouped.")
+                    }),
+            );
+        }
+        div()
+            .p_6()
+            .flex()
+            .flex_col()
+            .gap_4()
+            .child(if config.groups.is_empty() {
+                "No groups configured"
+            } else {
+                "Tunnel groups"
+            })
+            .child(
+                Button::new("new-group")
+                    .primary()
+                    .label("New Group")
+                    .on_click(cx.listener(|this, _, window, cx| this.new_group(window, cx))),
+            )
+            .child(rows)
+            .child(self.render_pager(cx))
     }
 
     fn render_hosts(&self, config: &DomainConfig, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1507,5 +1860,85 @@ impl Render for Workspace {
             .size_full()
             .child(self.render_sidebar(cx))
             .child(self.render_content(cx))
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use gpui_kit::TestAppContext;
+    use gpui_kit::test::TestWindowExt;
+
+    #[gpui_kit::test]
+    fn sidebar_opens_group_editor_and_cancel_restores_list(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let config = ConfigDocument::default()
+            .into_domain()
+            .expect("default config");
+        let handle = cx.add_window(move |window, cx| {
+            Workspace::new(Ok((PathBuf::new(), config)), None, None, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("Groups", cx);
+            window.click("new-group", cx);
+            assert!(window.find("save-group").visible());
+            window.click("cancel-group", cx);
+            assert!(window.find("new-group").visible());
+        })
+        .expect("workspace window");
+    }
+
+    #[gpui_kit::test]
+    fn tunnel_mode_host_key_prompt_and_settings_are_interactive(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let config = ConfigDocument::default()
+            .into_domain()
+            .expect("default config");
+        let handle = cx.add_window(move |window, cx| {
+            Workspace::new(Ok((PathBuf::new(), config)), None, None, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("Tunnels", cx);
+            window.click("new-tunnel", cx);
+            assert!(window.find("mode-Dynamic SOCKS5").visible());
+            window.click("mode-Local", cx);
+            window.click("mode-Remote", cx);
+            assert!(window.find("mode-Remote").visible());
+        })
+        .expect("tunnel editor window");
+        cx.update(|app| {
+            handle.update(app, |view, _, _| {
+                assert!(matches!(&view.editor, Some(Editor::Tunnel(editor)) if editor.mode == TunnelMode::Remote));
+            }).expect("tunnel editor state");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("cancel-editor", cx);
+            window.click("Settings", cx);
+            assert!(window.find("import-ssh-config").visible());
+            assert!(window.find("run-at-login").visible());
+        })
+        .expect("workspace window");
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, cx| {
+                    view.host_key_prompts = Arc::new(vec![HostKeyPromptView {
+                        id: 7,
+                        host: "example.test".into(),
+                        port: 22,
+                        algorithm: "ssh-ed25519".into(),
+                        fingerprint: "SHA256:test".into(),
+                    }]);
+                    cx.notify();
+                })
+                .expect("workspace update");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("trust-once-7").visible());
+            assert!(window.find("trust-save-7").visible());
+            assert!(window.find("trust-cancel-7").visible());
+        })
+        .expect("workspace window");
     }
 }

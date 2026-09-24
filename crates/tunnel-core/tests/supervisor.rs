@@ -76,7 +76,13 @@ async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .map(|value| value.clamp(1, 24));
-    let reconnect_cycles = soak_hours.or(stress_cycles).unwrap_or(1);
+    let soak_smoke = std::env::var("TUNNELWARDEN_SOAK_SMOKE").is_ok_and(|value| value == "1");
+    let soak_mode = soak_hours.is_some() || soak_smoke;
+    let reconnect_cycles = if soak_smoke {
+        1
+    } else {
+        soak_hours.or(stress_cycles).unwrap_or(1)
+    };
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("host key");
     let public_key = key.public_key().clone();
     let mut config = server::Config::default();
@@ -141,7 +147,7 @@ async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
     let root = CancellationToken::new();
     let supervisor = LocalForwardSupervisor::new(
         listener,
-        if soak_hours.is_some() {
+        if soak_mode {
             SupervisorMode::Dynamic
         } else {
             SupervisorMode::Local(RemoteEndpoint {
@@ -190,11 +196,17 @@ async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
             .await
     });
     wait_for_healthy(&mut state).await;
-    assert_traffic(local_address, b"before reconnect", soak_hours.is_some()).await;
+    assert_traffic(local_address, b"before reconnect", soak_mode).await;
     for cycle in 0..reconnect_cycles {
-        if soak_hours.is_some() {
-            for _ in 0..60 {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+        if soak_mode {
+            let checks = if soak_smoke { 2 } else { 60 };
+            let interval = if soak_smoke {
+                Duration::from_millis(100)
+            } else {
+                Duration::from_secs(60)
+            };
+            for _ in 0..checks {
+                tokio::time::sleep(interval).await;
                 assert_traffic(local_address, b"periodic soak traffic", true).await;
             }
         }
@@ -206,7 +218,7 @@ async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
         );
         wait_for_healthy(&mut state).await;
         if cycle % 100 == 0 || cycle + 1 == reconnect_cycles {
-            assert_traffic(local_address, b"after reconnect", soak_hours.is_some()).await;
+            assert_traffic(local_address, b"after reconnect", soak_mode).await;
         }
     }
     root.cancel();

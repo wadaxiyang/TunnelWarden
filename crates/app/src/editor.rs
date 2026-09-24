@@ -335,6 +335,6 @@ impl TunnelEditor {
 }
 
 pub enum Editor {
-    Host(HostEditor),
-    Tunnel(TunnelEditor),
+    Host(Box<HostEditor>),
+    Tunnel(Box<TunnelEditor>),
 }

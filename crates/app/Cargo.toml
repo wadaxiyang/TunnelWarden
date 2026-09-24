@@ -17,3 +17,6 @@ rand = "0.10"
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Networking_WinSock", "Win32_Security", "Win32_System_Threading"] }
 tray-icon = "0.24.2"
+
+[dev-dependencies]
+gpui-kit = { version = "=0.6.6", features = ["test-support"] }
