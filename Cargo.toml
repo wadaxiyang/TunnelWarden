@@ -1,0 +1,13 @@
+[workspace]
+members = ["crates/tunnel-domain", "crates/tunnel-core"]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+rust-version = "1.94"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+
