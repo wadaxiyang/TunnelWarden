@@ -1,0 +1,77 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and publish
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          persist-credentials: false
+      - name: Check tag and package version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RELEASE_TAG -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') {
+            throw "Expected a vMAJOR.MINOR.PATCH tag; got $env:RELEASE_TAG"
+          }
+          $metadata = cargo metadata --no-deps --locked --format-version 1 | ConvertFrom-Json
+          $app = $metadata.packages | Where-Object { $_.name -eq 'tunnelwarden' }
+          if ($null -eq $app -or $env:RELEASE_TAG -ne "v$($app.version)") {
+            throw "Tag $env:RELEASE_TAG does not match the tunnelwarden package version"
+          }
+      - name: Build Release executable
+        run: cargo build --release --locked -p tunnelwarden
+      - name: Package portable ZIP and checksum
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $env:RUNNER_TEMP 'tunnelwarden-dist'
+          $stage = Join-Path $dist 'portable'
+          New-Item -ItemType Directory -Path $stage -Force | Out-Null
+          Copy-Item -LiteralPath 'target/release/tunnelwarden.exe' -Destination (Join-Path $stage 'TunnelWarden.exe')
+          Copy-Item -LiteralPath 'README.md' -Destination $stage
+          Copy-Item -LiteralPath 'LICENSE' -Destination $stage
+          $zipName = 'TunnelWarden-' + $env:RELEASE_TAG + '-windows-x64.zip'
+          $zip = Join-Path $dist $zipName
+          Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath (Join-Path $dist 'SHA256SUMS.txt') -Value "$hash  $zipName" -Encoding utf8
+      - name: Publish GitHub Release
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $env:RUNNER_TEMP 'tunnelwarden-dist'
+          $zip = Join-Path $dist ('TunnelWarden-' + $env:RELEASE_TAG + '-windows-x64.zip')
+          $sums = Join-Path $dist 'SHA256SUMS.txt'
+          gh release view $env:RELEASE_TAG *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $env:RELEASE_TAG $zip $sums --clobber
+            if ($LASTEXITCODE -ne 0) { throw 'Could not update release assets' }
+            gh release edit $env:RELEASE_TAG --prerelease=false
+          } else {
+            $title = 'TunnelWarden ' + $env:RELEASE_TAG.Substring(1)
+            gh release create $env:RELEASE_TAG $zip $sums --verify-tag --title $title --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish release' }

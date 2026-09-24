@@ -26,10 +26,18 @@ import previews supported fields, conflicts and unmapped directives before
 adding jumpers. The `ProxyJump` directive is shown as a warning because imported
 jumpers do not automatically become tunnel Jump Chains.
 
-This is still an internal development build. The full v1.0 gates in
+The full v1.0 gates in
 [TunnelWarden_SPEC.md](TunnelWarden_SPEC.md) include a 24-hour soak, UI
 interaction checks, physical network and login tests, and an audit review.
 Passing a shorter test does not imply those gates have passed.
+
+## Releases
+
+Push a version tag such as `v0.2.0` after updating `crates/app/Cargo.toml`.
+The [Release workflow](.github/workflows/release.yml) builds a Windows x64
+portable ZIP, writes its SHA-256 checksum, and publishes a GitHub Release. It
+can also be run manually for an existing tag from the Actions page. Run tests
+locally before pushing the tag; the release workflow only builds and packages.
 
 ## Local checks
 
