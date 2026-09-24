@@ -22,7 +22,7 @@ use russh::{
 };
 use thiserror::Error;
 use tokio::{
-    io::AsyncReadExt,
+    io::{AsyncRead, AsyncReadExt, AsyncWrite},
     net::TcpStream,
     sync::mpsc,
     time::{timeout, timeout_at},
@@ -45,7 +45,12 @@ const MAX_FORWARDED_CHANNELS: usize = 64;
 const MAX_AGENT_IDENTITIES: usize = 32;
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
 
-enum Credentials {
+struct ConnectBudget {
+    cancellation: CancellationToken,
+    deadline: tokio::time::Instant,
+}
+
+pub enum SshCredential {
     Password(Zeroizing<String>),
     PrivateKey(Option<Zeroizing<String>>),
     Agent,
@@ -255,7 +260,7 @@ impl DirectSshSession {
     ) -> Result<Self, SshConnectError> {
         Self::connect_authenticated(
             host,
-            Credentials::Password(password),
+            SshCredential::Password(password),
             known_hosts_paths,
             parent_cancellation,
             None,
@@ -273,7 +278,7 @@ impl DirectSshSession {
     ) -> Result<Self, SshConnectError> {
         Self::connect_authenticated(
             host,
-            Credentials::PrivateKey(passphrase),
+            SshCredential::PrivateKey(passphrase),
             known_hosts_paths,
             parent_cancellation,
             None,
@@ -288,7 +293,7 @@ impl DirectSshSession {
     ) -> Result<Self, SshConnectError> {
         Self::connect_authenticated(
             host,
-            Credentials::Agent,
+            SshCredential::Agent,
             known_hosts_paths,
             parent_cancellation,
             None,
@@ -307,7 +312,7 @@ impl DirectSshSession {
     ) -> Result<Self, SshConnectError> {
         Self::connect_authenticated(
             host,
-            Credentials::Password(password),
+            SshCredential::Password(password),
             known_hosts_paths,
             parent_cancellation,
             Some(remote),
@@ -324,7 +329,7 @@ impl DirectSshSession {
     ) -> Result<Self, SshConnectError> {
         Self::connect_authenticated(
             host,
-            Credentials::PrivateKey(passphrase),
+            SshCredential::PrivateKey(passphrase),
             known_hosts_paths,
             parent_cancellation,
             Some(remote),
@@ -340,7 +345,7 @@ impl DirectSshSession {
     ) -> Result<Self, SshConnectError> {
         Self::connect_authenticated(
             host,
-            Credentials::Agent,
+            SshCredential::Agent,
             known_hosts_paths,
             parent_cancellation,
             Some(remote),
@@ -348,18 +353,21 @@ impl DirectSshSession {
         .await
     }
 
-    async fn connect_authenticated(
+    pub(crate) async fn connect_authenticated(
         host: &SshHost,
-        credentials: Credentials,
+        credentials: SshCredential,
         known_hosts_paths: &[PathBuf],
         parent_cancellation: &CancellationToken,
         remote: Option<RemoteEndpoint>,
     ) -> Result<Self, SshConnectError> {
         validate(host, &credentials, known_hosts_paths)?;
         let private_key = match (&host.auth, &credentials) {
-            (AuthConfig::PrivateKey { key_path, .. }, Credentials::PrivateKey(passphrase)) => Some(
-                load_private_key(key_path, passphrase.as_ref().map(|value| value.as_str())).await?,
-            ),
+            (AuthConfig::PrivateKey { key_path, .. }, SshCredential::PrivateKey(passphrase)) => {
+                Some(
+                    load_private_key(key_path, passphrase.as_ref().map(|value| value.as_str()))
+                        .await?,
+                )
+            }
             _ => None,
         };
         let cancellation = parent_cancellation.child_token();
@@ -375,6 +383,72 @@ impl DirectSshSession {
                 }
             }
         };
+        Self::finish_connection(
+            host,
+            credentials,
+            known_hosts_paths,
+            ConnectBudget {
+                cancellation,
+                deadline,
+            },
+            remote,
+            private_key,
+            stream,
+        )
+        .await
+    }
+
+    pub(crate) async fn connect_via_channel(
+        host: &SshHost,
+        credentials: SshCredential,
+        known_hosts_paths: &[PathBuf],
+        parent_cancellation: &CancellationToken,
+        remote: Option<RemoteEndpoint>,
+        channel: DirectTcpStream,
+    ) -> Result<Self, SshConnectError> {
+        validate(host, &credentials, known_hosts_paths)?;
+        let private_key = match (&host.auth, &credentials) {
+            (AuthConfig::PrivateKey { key_path, .. }, SshCredential::PrivateKey(passphrase)) => {
+                Some(
+                    load_private_key(key_path, passphrase.as_ref().map(|value| value.as_str()))
+                        .await?,
+                )
+            }
+            _ => None,
+        };
+        let cancellation = parent_cancellation.child_token();
+        let deadline = tokio::time::Instant::now() + host.connect_timeout;
+        Self::finish_connection(
+            host,
+            credentials,
+            known_hosts_paths,
+            ConnectBudget {
+                cancellation,
+                deadline,
+            },
+            remote,
+            private_key,
+            channel,
+        )
+        .await
+    }
+
+    async fn finish_connection<S>(
+        host: &SshHost,
+        credentials: SshCredential,
+        known_hosts_paths: &[PathBuf],
+        budget: ConnectBudget,
+        remote: Option<RemoteEndpoint>,
+        private_key: Option<Arc<russh::keys::PrivateKey>>,
+        stream: S,
+    ) -> Result<Self, SshConnectError>
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let ConnectBudget {
+            cancellation,
+            deadline,
+        } = budget;
         let config = Arc::new(client::Config {
             nodelay: true,
             keepalive_interval: if host.keepalive_interval.is_zero() {
@@ -600,21 +674,21 @@ impl Drop for DirectSshSession {
 async fn authenticate(
     handle: &mut client::Handle<HostKeyVerifier>,
     host: &SshHost,
-    credentials: Credentials,
+    credentials: SshCredential,
     private_key: Option<Arc<russh::keys::PrivateKey>>,
 ) -> Result<(), SshConnectError> {
-    if matches!(credentials, Credentials::Agent) {
+    if matches!(credentials, SshCredential::Agent) {
         return authenticate_agent(handle, host).await;
     }
     let result = match credentials {
-        Credentials::Password(mut password) => {
+        SshCredential::Password(mut password) => {
             let raw_password = std::mem::take(&mut *password);
             handle
                 .authenticate_password(host.username.as_str(), raw_password)
                 .await
                 .map_err(SshConnectError::Authentication)?
         }
-        Credentials::PrivateKey(_) => {
+        SshCredential::PrivateKey(_) => {
             let key = private_key.ok_or(SshConnectError::InvalidConfig("missing private key"))?;
             let hash = handle
                 .best_supported_rsa_hash()
@@ -629,7 +703,7 @@ async fn authenticate(
                 .await
                 .map_err(SshConnectError::Authentication)?
         }
-        Credentials::Agent => return Err(SshConnectError::InvalidConfig("invalid agent state")),
+        SshCredential::Agent => return Err(SshConnectError::InvalidConfig("invalid agent state")),
     };
     if result.success() {
         Ok(())
@@ -749,13 +823,13 @@ async fn load_private_key(
 
 fn validate(
     host: &SshHost,
-    credentials: &Credentials,
+    credentials: &SshCredential,
     known_hosts_paths: &[PathBuf],
 ) -> Result<(), SshConnectError> {
     match (&host.auth, credentials) {
-        (AuthConfig::Password { .. }, Credentials::Password(_)) => {}
-        (AuthConfig::PrivateKey { .. }, Credentials::PrivateKey(_)) => {}
-        (AuthConfig::Agent { .. }, Credentials::Agent) => {}
+        (AuthConfig::Password { .. }, SshCredential::Password(_)) => {}
+        (AuthConfig::PrivateKey { .. }, SshCredential::PrivateKey(_)) => {}
+        (AuthConfig::Agent { .. }, SshCredential::Agent) => {}
         _ => return Err(SshConnectError::InvalidConfig("SSH auth method mismatch")),
     }
     if host.hostname.trim().is_empty() {

@@ -5,18 +5,17 @@ use std::{
     task::{Context, Poll},
 };
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
-use tokio::net::TcpStream;
 use tokio_util::sync::{CancellationToken, WaitForCancellationFutureOwned};
 
 /// Cancels the actual transport even if russh has already moved it into its
 /// internal session task while `connect_stream` is still awaiting the KEX.
-pub(crate) struct CancellableStream {
-    inner: TcpStream,
+pub(crate) struct CancellableStream<S> {
+    inner: S,
     cancelled: Pin<Box<WaitForCancellationFutureOwned>>,
 }
 
-impl CancellableStream {
-    pub(crate) fn new(inner: TcpStream, cancellation: CancellationToken) -> Self {
+impl<S> CancellableStream<S> {
+    pub(crate) fn new(inner: S, cancellation: CancellationToken) -> Self {
         Self {
             inner,
             cancelled: Box::pin(cancellation.cancelled_owned()),
@@ -34,7 +33,7 @@ impl CancellableStream {
     }
 }
 
-impl AsyncRead for CancellableStream {
+impl<S: AsyncRead + Unpin> AsyncRead for CancellableStream<S> {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
@@ -48,7 +47,7 @@ impl AsyncRead for CancellableStream {
     }
 }
 
-impl AsyncWrite for CancellableStream {
+impl<S: AsyncWrite + Unpin> AsyncWrite for CancellableStream<S> {
     fn poll_write(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,

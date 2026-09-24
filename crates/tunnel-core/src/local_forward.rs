@@ -1,7 +1,7 @@
 use std::{io, net::SocketAddr, sync::Arc, time::Duration};
 
 use forwarding::{Socks5Frontend, SocksFrontend, SocksReply, TrafficCounters, relay_bidirectional};
-use ssh_engine::{DirectSshSession, DirectTcpStream, ForwardingFailure, SshConnectError};
+use ssh_engine::{DirectSshSession, DirectTcpStream, ForwardingFailure, SshChain, SshConnectError};
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
@@ -49,7 +49,7 @@ struct OpenRequest {
 /// either Local or Dynamic forwarding. The caller drives `run`, then `stop`.
 pub struct LocalForwardWorker {
     listener: ListenerRuntime,
-    session: Option<DirectSshSession>,
+    session: Option<SshChain>,
     mode: ForwardMode,
     cancellation: CancellationToken,
     connections: JoinSet<io::Result<()>>,
@@ -65,7 +65,7 @@ impl LocalForwardWorker {
     ) -> Result<Self, LocalForwardError> {
         Self::build(
             listener,
-            session,
+            SshChain::single(session),
             ForwardMode::Fixed(destination),
             cancellation,
         )
@@ -76,12 +76,39 @@ impl LocalForwardWorker {
         session: DirectSshSession,
         cancellation: CancellationToken,
     ) -> Result<Self, LocalForwardError> {
+        Self::build(
+            listener,
+            SshChain::single(session),
+            ForwardMode::Dynamic,
+            cancellation,
+        )
+    }
+
+    pub fn new_chain(
+        listener: ListenerRuntime,
+        session: SshChain,
+        destination: RemoteEndpoint,
+        cancellation: CancellationToken,
+    ) -> Result<Self, LocalForwardError> {
+        Self::build(
+            listener,
+            session,
+            ForwardMode::Fixed(destination),
+            cancellation,
+        )
+    }
+
+    pub fn new_dynamic_chain(
+        listener: ListenerRuntime,
+        session: SshChain,
+        cancellation: CancellationToken,
+    ) -> Result<Self, LocalForwardError> {
         Self::build(listener, session, ForwardMode::Dynamic, cancellation)
     }
 
     fn build(
         listener: ListenerRuntime,
-        session: DirectSshSession,
+        session: SshChain,
         mode: ForwardMode,
         cancellation: CancellationToken,
     ) -> Result<Self, LocalForwardError> {
@@ -139,7 +166,7 @@ impl LocalForwardWorker {
                     let result = tokio::select! {
                         biased;
                         _ = self.cancellation.cancelled() => Err(SshConnectError::Cancelled),
-                        result = session.open_direct_tcpip(
+                        result = session.final_session().open_direct_tcpip(
                             &request.destination_host,
                             request.destination_port,
                             request.originator,
@@ -175,10 +202,8 @@ impl LocalForwardWorker {
             connections.abort_all();
             while connections.join_next().await.is_some() {}
         }
-        if let Some(session) = self.session.take()
-            && let Err(error) = session.disconnect().await
-        {
-            debug!(%error, "SSH session closed during forward stop");
+        if let Some(session) = self.session.take() {
+            session.disconnect().await;
         }
         self.listener.stop()?;
         Ok(())

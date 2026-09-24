@@ -28,8 +28,10 @@ joins connection tasks, counts traffic, and releases its port on Stop. An
 in-process SSH integration test covers both modes. Remote forwarding also
 registers `tcpip-forward`, relays server-opened `forwarded-tcpip` channels to a
 local target, and cancels the registration during Stop. Its integration test
-checks data flow and cancellation acknowledgement. The automatic reconnect
-supervisor, Jump Chain, and GUI remain in progress. Configuration storage now
+checks data flow and cancellation acknowledgement. A two-hop Jump Chain now
+performs the second SSH handshake through the first hop's `direct-tcpip` channel
+and keeps both sessions owned until disconnect. The automatic reconnect
+supervisor and GUI remain in progress. Configuration storage now
 loads and saves schema-v1 TOML with a 4 MiB read limit, a synced temporary file,
 atomic replacement, and five backups. Agent
 authentication has an unavailable-agent test but still needs a positive test

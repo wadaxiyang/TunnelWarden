@@ -1,7 +1,9 @@
 use std::{io, sync::Arc, time::Duration};
 
 use forwarding::{TrafficCounters, relay_bidirectional};
-use ssh_engine::{DirectSshSession, DirectTcpStream, RemoteForwardRegistration, SshConnectError};
+use ssh_engine::{
+    DirectSshSession, DirectTcpStream, RemoteForwardRegistration, SshChain, SshConnectError,
+};
 use thiserror::Error;
 use tokio::{
     net::TcpStream,
@@ -32,7 +34,7 @@ pub enum RemoteForwardError {
 
 /// Owns one SSH remote forward registration and its bounded relay task tree.
 pub struct RemoteForwardWorker {
-    session: Option<DirectSshSession>,
+    session: Option<SshChain>,
     channels: mpsc::Receiver<DirectTcpStream>,
     local_target: LocalEndpoint,
     bound_port: u16,
@@ -43,7 +45,15 @@ pub struct RemoteForwardWorker {
 
 impl RemoteForwardWorker {
     pub async fn start(
-        mut session: DirectSshSession,
+        session: DirectSshSession,
+        local_target: LocalEndpoint,
+        cancellation: CancellationToken,
+    ) -> Result<Self, RemoteForwardError> {
+        Self::start_chain(SshChain::single(session), local_target, cancellation).await
+    }
+
+    pub async fn start_chain(
+        mut session: SshChain,
         local_target: LocalEndpoint,
         cancellation: CancellationToken,
     ) -> Result<Self, RemoteForwardError> {
@@ -51,6 +61,7 @@ impl RemoteForwardWorker {
             return Err(RemoteForwardError::InvalidTarget);
         }
         let RemoteForwardRegistration { port, channels } = session
+            .final_session_mut()
             .request_remote_forward(REMOTE_REQUEST_TIMEOUT)
             .await
             .map_err(RemoteForwardError::Registration)?;
@@ -123,7 +134,10 @@ impl RemoteForwardWorker {
         // still live. Closing the session afterward also removes it if cancel
         // was denied or timed out.
         let cancel_result = if let Some(session) = self.session.as_mut() {
-            session.cancel_remote_forward(REMOTE_REQUEST_TIMEOUT).await
+            session
+                .final_session_mut()
+                .cancel_remote_forward(REMOTE_REQUEST_TIMEOUT)
+                .await
         } else {
             Ok(())
         };
@@ -138,10 +152,8 @@ impl RemoteForwardWorker {
             connections.abort_all();
             while connections.join_next().await.is_some() {}
         }
-        if let Some(session) = self.session.take()
-            && let Err(error) = session.disconnect().await
-        {
-            debug!(%error, "SSH session closed during remote forward stop");
+        if let Some(session) = self.session.take() {
+            session.disconnect().await;
         }
         cancel_result.map_err(RemoteForwardError::Cancellation)
     }
