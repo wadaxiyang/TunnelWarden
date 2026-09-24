@@ -78,3 +78,28 @@ port. For login, turn on “Launch at Windows login” in Settings, sign out and
 back in, then verify the tray starts in the background and configured autostart
 tunnels connect. The v1.0 release gate remains open until these checks and the
 24-hour soak pass.
+
+## 2026-09-25, memory attribution and safe reduction
+
+- The Release `window_probe` example now opens its minimal GPUI Kit window at
+  launch, so the same window-cycle script can measure it. After 30 close/reopen
+  cycles, this one-label window used 63.5 MB Working Set, 113.0 MB Private Bytes,
+  562 handles, 48 threads and 31.5 MB GPU local memory. The full app's GUI
+  footprint is therefore close to the framework/window baseline on this host;
+  these are separate runs and should not be interpreted as an exact subtraction.
+- In a 668,902-byte synthetic configuration with 1,000 stopped tunnels and
+  512-byte descriptions, the previous Release background app sampled at
+  53.6 MB Working Set and 61.7 MB Private Bytes after eight seconds. Sharing
+  the startup configuration between desktop event tasks instead of cloning it
+  sampled at 52.1/60.2 MB; two fresh runs were 52.6/60.8 and 52.1/60.3 MB.
+  This change preserves one owned UI copy when a window actually opens.
+- The changed full Release app completed 60 window close/reopen cycles. Its
+  Working Set was 59.5 MB at cycle 1 and 62.8 MB at cycle 60; Private Bytes
+  was 107.7→116.2 MB with non-monotonic swings, handles 599→590, threads
+  52→48 and GPU local memory settled at 31.5 MB. No sustained linear growth
+  appeared.
+- After closing a single full-app window, Working Set was 62.4 MB at both five
+  and 25 seconds; Private Bytes was 82.5 MB. The minimal GPUI Kit process
+  likewise remained at 59.7 MB Working Set and 81.4 MB Private Bytes after
+  25 seconds. View/window handles dropped, while framework-renderer memory
+  remained resident. No working-set trimming was used.

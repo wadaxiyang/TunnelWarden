@@ -64,6 +64,10 @@ mod app {
                     _task: task,
                     window: None,
                 });
+                match open(cx) {
+                    Ok(window) => cx.global_mut::<Owner>().window = Some(window),
+                    Err(error) => eprintln!("Probe window: {error}"),
+                }
             });
     }
 

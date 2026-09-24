@@ -8,7 +8,7 @@ mod runtime_host;
 mod tray;
 mod workspace;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 use config_store::{ConfigDocument, ConfigStore, DomainConfig};
 use gpui_kit::component::Root;
@@ -25,6 +25,8 @@ use tokio::sync::mpsc;
 use tray::{TrayAction, TrayController};
 #[cfg(windows)]
 use tunnel_core::{CoreCommand, ManagerSnapshot, SupervisorState};
+
+type Startup = Result<(PathBuf, DomainConfig), String>;
 
 #[cfg(windows)]
 struct DesktopShell {
@@ -51,18 +53,20 @@ fn main() {
         }
     };
     let background = std::env::args_os().any(|arg| arg == "--background");
-    let startup: Result<(PathBuf, DomainConfig), String> = ConfigStore::default_windows()
-        .and_then(|store| {
-            let directory = store.directory().to_path_buf();
-            store.load().map(|config| (directory, config))
-        })
-        .map_err(|error| error.to_string());
+    let startup: Arc<Startup> = Arc::new(
+        ConfigStore::default_windows()
+            .and_then(|store| {
+                let directory = store.directory().to_path_buf();
+                store.load().map(|config| (directory, config))
+            })
+            .map_err(|error| error.to_string()),
+    );
 
     gpui_kit::application()
         .with_assets(gpui_kit::assets::Assets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            let (runtime, runtime_error) = match &startup {
+            let (runtime, runtime_error) = match startup.as_ref() {
                 Ok((directory, config)) => {
                     match runtime_host::RuntimeHost::new(config.clone(), directory.clone()) {
                         Ok(runtime) => (Some(runtime), None),
@@ -82,7 +86,13 @@ fn main() {
                 let config = manager
                     .as_ref()
                     .map(|handle| handle.subscribe_config().borrow().as_ref().clone())
-                    .or_else(|| startup.as_ref().ok().map(|(_, config)| config.clone()))
+                    .or_else(|| {
+                        startup
+                            .as_ref()
+                            .as_ref()
+                            .ok()
+                            .map(|(_, config)| config.clone())
+                    })
                     .or_else(|| ConfigDocument::default().into_domain().ok());
                 let snapshot = manager
                     .as_ref()
@@ -105,7 +115,7 @@ fn main() {
                 let initial_window = if !background || tray.is_none() {
                     match open_main_window(
                         cx,
-                        startup.clone(),
+                        startup.as_ref().clone(),
                         manager.clone(),
                         runtime_error.clone(),
                     ) {
@@ -119,7 +129,7 @@ fn main() {
                     None
                 };
                 let action_manager = manager.clone();
-                let action_startup = startup.clone();
+                let action_startup = Arc::clone(&startup);
                 let action_runtime_error = runtime_error.clone();
                 let actions = cx.spawn(async move |cx| {
                     loop {
@@ -176,7 +186,7 @@ fn main() {
                     let mut configs = handle.subscribe_config();
                     let mut snapshots = handle.subscribe();
                     let mut host_keys = handle.subscribe_host_keys();
-                    let state_startup = startup.clone();
+                    let state_startup = Arc::clone(&startup);
                     let state_manager = manager.clone();
                     let state_runtime_error = runtime_error.clone();
                     Some(cx.spawn(async move |cx| {
@@ -235,7 +245,9 @@ fn main() {
                 });
             }
             #[cfg(not(windows))]
-            if let Err(error) = open_main_window(cx, startup, manager, runtime_error) {
+            if let Err(error) =
+                open_main_window(cx, startup.as_ref().clone(), manager, runtime_error)
+            {
                 eprintln!("Could not open TunnelWarden window: {error}");
             }
         });
@@ -243,7 +255,7 @@ fn main() {
 
 fn open_main_window(
     cx: &mut App,
-    startup: Result<(PathBuf, DomainConfig), String>,
+    startup: Startup,
     manager: Option<ManagerHandle>,
     runtime_error: Option<String>,
 ) -> Result<WindowHandle<Root>, String> {
@@ -279,7 +291,7 @@ fn open_main_window(
 #[cfg(windows)]
 fn show_main_window(
     cx: &mut App,
-    startup: Result<(PathBuf, DomainConfig), String>,
+    startup: Arc<Startup>,
     manager: Option<ManagerHandle>,
     runtime_error: Option<String>,
 ) {
@@ -291,12 +303,12 @@ fn show_main_window(
     {
         return;
     }
-    let startup = match (startup, &manager) {
+    let startup = match (startup.as_ref(), &manager) {
         (Ok((directory, _)), Some(handle)) => Ok((
-            directory,
+            directory.clone(),
             handle.subscribe_config().borrow().as_ref().clone(),
         )),
-        (other, _) => other,
+        (other, _) => other.clone(),
     };
     match open_main_window(cx, startup, manager, runtime_error) {
         Ok(window) => cx.global_mut::<DesktopShell>().window = Some(window),
