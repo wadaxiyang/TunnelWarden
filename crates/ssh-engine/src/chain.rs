@@ -8,7 +8,7 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tunnel_domain::{RemoteEndpoint, SshHost};
 
-use crate::{DirectSshSession, SshConnectError, SshCredential};
+use crate::{DirectSshSession, HostKeyApproval, SshConnectError, SshCredential};
 
 const MAX_HOPS: usize = 16;
 
@@ -53,6 +53,15 @@ impl SshChain {
         remote: Option<RemoteEndpoint>,
         cancellation: &CancellationToken,
     ) -> Result<Self, SshChainError> {
+        Self::connect_with_approval(hops, remote, cancellation, None).await
+    }
+
+    pub async fn connect_with_approval(
+        hops: Vec<HopSpec>,
+        remote: Option<RemoteEndpoint>,
+        cancellation: &CancellationToken,
+        approval: Option<HostKeyApproval>,
+    ) -> Result<Self, SshChainError> {
         if hops.is_empty() {
             return Err(SshChainError::Empty);
         }
@@ -74,6 +83,7 @@ impl SshChain {
             &first.known_hosts_paths,
             cancellation,
             first_remote,
+            approval.clone(),
         )
         .await
         .map_err(|source| SshChainError::Hop {
@@ -119,6 +129,7 @@ impl SshChain {
                 cancellation,
                 final_remote,
                 channel,
+                approval.clone(),
             )
             .await;
             match next {

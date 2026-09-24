@@ -14,13 +14,14 @@ mod supervisor;
 pub use health::WorkerHealth;
 pub use local_forward::{LocalForwardError, LocalForwardWorker};
 pub use manager::{
-    CoreCommand, CredentialSource, ManagerError, ManagerHandle, ManagerSnapshot, TunnelManager,
-    TunnelView,
+    CoreCommand, CredentialSource, HostKeyPromptView, ManagerError, ManagerHandle, ManagerSnapshot,
+    SecretUpdate, TunnelManager, TunnelView,
 };
 pub use remote_forward::{RemoteForwardError, RemoteForwardWorker};
 pub use remote_supervisor::RemoteForwardSupervisor;
 pub use retry::RetrySchedule;
 pub use runtime::{ListenerRuntime, ListenerRuntimeError};
+pub use ssh_engine::HostKeyDecision;
 pub use state_machine::{
     Event, EventOutcome, Lifecycle, MachineError, RuntimePhase, StateMachine, StateTransition,
     TransitionEffect,

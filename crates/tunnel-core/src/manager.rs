@@ -6,11 +6,17 @@ use std::{
     time::Duration,
 };
 
-use config_store::{ConfigDocument, ConfigStore, DomainConfig};
-use ssh_engine::{HopSpec, SshChain, SshChainError, SshCredential};
+use config_store::{
+    AppSettings, ConfigDocument, ConfigStore, DomainConfig, SecretStore, SshImportPreview,
+    preview_ssh_config,
+};
+use ssh_engine::{
+    HopSpec, HostKeyApproval, HostKeyDecision, HostKeyPrompt, SshChain, SshChainError,
+    SshCredential,
+};
 use thiserror::Error;
 use tokio::{
-    sync::{Notify, mpsc, oneshot, watch},
+    sync::{Mutex, Notify, mpsc, oneshot, watch},
     task::JoinHandle,
     time::{Instant, interval, timeout, timeout_at},
 };
@@ -28,6 +34,7 @@ use crate::{
 const MAX_TUNNELS: usize = 1024;
 const COMMAND_CAPACITY: usize = 128;
 const STOP_DEADLINE: Duration = Duration::from_secs(3);
+const MAX_HOST_KEY_PROMPTS: usize = 16;
 
 /// Blocking OS credential-store access. The manager always invokes this on a
 /// Tokio blocking worker and never retains plaintext beyond one SSH attempt.
@@ -43,7 +50,18 @@ pub struct TunnelView {
 
 pub type ManagerSnapshot = HashMap<TunnelId, TunnelView>;
 
+#[derive(Clone, Debug)]
+pub struct HostKeyPromptView {
+    pub id: u64,
+    pub host: String,
+    pub port: u16,
+    pub algorithm: String,
+    pub fingerprint: String,
+}
+
 pub enum CoreCommand {
+    StartAll,
+    StopAll,
     StartTunnel(TunnelId),
     StopTunnel(TunnelId),
     RestartTunnel(TunnelId),
@@ -52,8 +70,32 @@ pub enum CoreCommand {
     SaveConfig {
         directory: PathBuf,
         config: DomainConfig,
+        secret: Option<SecretUpdate>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    ImportConfig {
+        path: PathBuf,
+        reply: oneshot::Sender<Result<DomainConfig, String>>,
+    },
+    PreviewSshConfig {
+        path: PathBuf,
+        reply: oneshot::Sender<Result<SshImportPreview, String>>,
+    },
+    ExportConfig {
+        path: PathBuf,
+        config: DomainConfig,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    ResolveHostKey {
+        id: u64,
+        decision: HostKeyDecision,
+    },
+}
+
+pub struct SecretUpdate {
+    /// A new keyring reference. Existing secrets remain available on failure.
+    pub reference: SecretRef,
+    pub value: Zeroizing<String>,
 }
 
 #[derive(Debug, Error)]
@@ -68,6 +110,8 @@ pub enum ManagerError {
 pub struct ManagerHandle {
     commands: mpsc::Sender<CoreCommand>,
     snapshots: watch::Receiver<Arc<ManagerSnapshot>>,
+    host_keys: watch::Receiver<Arc<Vec<HostKeyPromptView>>>,
+    config: watch::Receiver<Arc<DomainConfig>>,
     shutdown: CancellationToken,
 }
 
@@ -85,6 +129,13 @@ impl ManagerHandle {
         self.snapshots.clone()
     }
 
+    pub fn subscribe_host_keys(&self) -> watch::Receiver<Arc<Vec<HostKeyPromptView>>> {
+        self.host_keys.clone()
+    }
+    pub fn subscribe_config(&self) -> watch::Receiver<Arc<DomainConfig>> {
+        self.config.clone()
+    }
+
     pub fn shutdown(&self) {
         self.shutdown.cancel();
     }
@@ -95,6 +146,11 @@ struct ActiveTunnel {
     task: JoinHandle<Option<String>>,
     state: watch::Receiver<SupervisorState>,
     retry_hint: Arc<Notify>,
+}
+
+struct PendingHostKey {
+    view: HostKeyPromptView,
+    reply: oneshot::Sender<HostKeyDecision>,
 }
 
 /// Single writer for desired tunnel state and the bounded UI snapshot. It owns
@@ -110,6 +166,14 @@ pub struct TunnelManager {
     active: HashMap<TunnelId, ActiveTunnel>,
     shutdown: CancellationToken,
     auto_start: Vec<TunnelId>,
+    host_key_sender: mpsc::Sender<HostKeyPrompt>,
+    host_key_requests: mpsc::Receiver<HostKeyPrompt>,
+    host_key_views: watch::Sender<Arc<Vec<HostKeyPromptView>>>,
+    config_views: watch::Sender<Arc<DomainConfig>>,
+    pending_host_keys: Vec<PendingHostKey>,
+    next_host_key_id: u64,
+    app_known_hosts_path: Option<PathBuf>,
+    host_key_save_lock: Arc<Mutex<()>>,
 }
 
 impl TunnelManager {
@@ -143,6 +207,14 @@ impl TunnelManager {
         }
         let (commands_tx, commands_rx) = mpsc::channel(COMMAND_CAPACITY);
         let (snapshots_tx, snapshots_rx) = watch::channel(Arc::new(current.clone()));
+        let (host_key_sender, host_key_requests) = mpsc::channel(MAX_HOST_KEY_PROMPTS);
+        let (host_key_views, host_key_rx) = watch::channel(Arc::new(Vec::new()));
+        let (config_views, config_rx) = watch::channel(Arc::new(DomainConfig {
+            app: AppSettings::default(),
+            hosts: hosts.clone(),
+            groups: groups.clone(),
+            tunnels: definitions.values().cloned().collect(),
+        }));
         let shutdown = CancellationToken::new();
         Ok((
             Self {
@@ -156,13 +228,35 @@ impl TunnelManager {
                 active: HashMap::new(),
                 shutdown: shutdown.clone(),
                 auto_start,
+                host_key_sender,
+                host_key_requests,
+                host_key_views,
+                config_views,
+                pending_host_keys: Vec::new(),
+                next_host_key_id: 1,
+                app_known_hosts_path: None,
+                host_key_save_lock: Arc::new(Mutex::new(())),
             },
             ManagerHandle {
                 commands: commands_tx,
                 snapshots: snapshots_rx,
+                host_keys: host_key_rx,
+                config: config_rx,
                 shutdown,
             },
         ))
+    }
+
+    pub fn with_app_known_hosts(mut self, path: PathBuf) -> Self {
+        self.app_known_hosts_path = Some(path);
+        self
+    }
+
+    pub fn with_app_settings(self, app: AppSettings) -> Self {
+        let mut config = (*self.config_views.borrow()).as_ref().clone();
+        config.app = app;
+        self.config_views.send_replace(Arc::new(config));
+        self
     }
 
     pub async fn run(mut self) {
@@ -179,6 +273,14 @@ impl TunnelManager {
                 biased;
                 _ = self.shutdown.cancelled() => break,
                 command = self.commands.recv() => match command {
+                    Some(CoreCommand::StartAll) => {
+                        let ids: Vec<_> = self.tunnels.keys().cloned().collect();
+                        for id in ids { self.start(&id).await; }
+                    }
+                    Some(CoreCommand::StopAll) => {
+                        let ids: Vec<_> = self.active.keys().cloned().collect();
+                        for id in ids { self.stop(&id).await; }
+                    }
                     Some(CoreCommand::StartTunnel(id)) => self.start(&id).await,
                     Some(CoreCommand::StopTunnel(id)) => self.stop(&id).await,
                     Some(CoreCommand::RestartTunnel(id)) => {
@@ -201,14 +303,39 @@ impl TunnelManager {
                             }
                         }
                     }
-                    Some(CoreCommand::SaveConfig { directory, config, reply }) => {
-                        let result = Self::persist_config(directory, config.clone()).await;
+                    Some(CoreCommand::SaveConfig { directory, config, secret, reply }) => {
+                        let result = Self::persist_config(directory, config.clone(), secret).await;
                         if result.is_ok() {
                             self.replace_config(config).await;
                         }
                         let _ = reply.send(result);
                     }
+                    Some(CoreCommand::ImportConfig { path, reply }) => {
+                        let result = tokio::task::spawn_blocking(move || ConfigStore::import_file(&path).map_err(|error| error.to_string()))
+                            .await.map_err(|error| error.to_string()).and_then(|result| result);
+                        let _ = reply.send(result);
+                    }
+                    Some(CoreCommand::PreviewSshConfig { path, reply }) => {
+                        let result = tokio::task::spawn_blocking(move || preview_ssh_config(&path).map_err(|error| error.to_string()))
+                            .await.map_err(|error| error.to_string()).and_then(|result| result);
+                        let _ = reply.send(result);
+                    }
+                    Some(CoreCommand::ExportConfig { path, config, reply }) => {
+                        let result = tokio::task::spawn_blocking(move || ConfigStore::export_file(&path, config).map_err(|error| error.to_string()))
+                            .await.map_err(|error| error.to_string()).and_then(|result| result);
+                        let _ = reply.send(result);
+                    }
+                    Some(CoreCommand::ResolveHostKey { id, decision }) => {
+                        if let Some(index) = self.pending_host_keys.iter().position(|prompt| prompt.view.id == id) {
+                            let pending = self.pending_host_keys.remove(index);
+                            let _ = pending.reply.send(decision);
+                            self.publish_host_keys();
+                        }
+                    }
                     None => break,
+                },
+                prompt = self.host_key_requests.recv() => {
+                    if let Some(prompt) = prompt { self.queue_host_key(prompt); }
                 },
                 _ = poll.tick(), if !self.active.is_empty() => self.refresh().await,
             }
@@ -216,6 +343,7 @@ impl TunnelManager {
         for active in self.active.values() {
             active.cancellation.cancel();
         }
+        self.pending_host_keys.clear();
         let deadline = Instant::now() + STOP_DEADLINE;
         for (_, mut active) in self.active.drain() {
             if timeout_at(deadline, &mut active.task).await.is_err() {
@@ -225,18 +353,62 @@ impl TunnelManager {
         }
     }
 
-    async fn persist_config(directory: PathBuf, config: DomainConfig) -> Result<(), String> {
+    fn queue_host_key(&mut self, prompt: HostKeyPrompt) {
+        if self.pending_host_keys.len() >= MAX_HOST_KEY_PROMPTS {
+            let _ = prompt.reply.send(HostKeyDecision::Cancel);
+            return;
+        }
+        let view = HostKeyPromptView {
+            id: self.next_host_key_id,
+            host: prompt.host,
+            port: prompt.port,
+            algorithm: prompt.algorithm,
+            fingerprint: prompt.fingerprint,
+        };
+        self.next_host_key_id = self.next_host_key_id.wrapping_add(1).max(1);
+        self.pending_host_keys.push(PendingHostKey {
+            view,
+            reply: prompt.reply,
+        });
+        self.publish_host_keys();
+    }
+
+    fn publish_host_keys(&self) {
+        self.host_key_views.send_replace(Arc::new(
+            self.pending_host_keys
+                .iter()
+                .map(|prompt| prompt.view.clone())
+                .collect(),
+        ));
+    }
+
+    async fn persist_config(
+        directory: PathBuf,
+        config: DomainConfig,
+        secret: Option<SecretUpdate>,
+    ) -> Result<(), String> {
         tokio::task::spawn_blocking(move || {
             let document = ConfigDocument::try_from(config).map_err(|error| error.to_string())?;
-            ConfigStore::new(directory)
-                .save(document)
-                .map_err(|error| error.to_string())
+            if let Some(secret) = &secret {
+                SecretStore::save(&secret.reference, &secret.value)
+                    .map_err(|error| error.to_string())?;
+            }
+            match ConfigStore::new(directory).save(document) {
+                Ok(()) => Ok(()),
+                Err(error) => {
+                    if let Some(secret) = &secret {
+                        let _ = SecretStore::delete(&secret.reference);
+                    }
+                    Err(error.to_string())
+                }
+            }
         })
         .await
         .map_err(|error| error.to_string())?
     }
 
     async fn replace_config(&mut self, config: DomainConfig) {
+        self.config_views.send_replace(Arc::new(config.clone()));
         let old_running: HashSet<TunnelId> = self.active.keys().cloned().collect();
         let updated: HashMap<TunnelId, TunnelConfig> = config
             .tunnels
@@ -321,6 +493,12 @@ impl TunnelManager {
             }
         };
         let cancellation = CancellationToken::new();
+        let app_path = self.app_known_hosts_path.clone();
+        let approval = app_path.as_ref().map(|path| HostKeyApproval {
+            prompts: self.host_key_sender.clone(),
+            save_path: path.clone(),
+            save_lock: Arc::clone(&self.host_key_save_lock),
+        });
         let (task, state, local_addr, retry_hint) = match tunnel.mode {
             TunnelMode::Local | TunnelMode::Dynamic => {
                 let address: SocketAddr =
@@ -389,6 +567,8 @@ impl TunnelManager {
                 let credentials = Arc::clone(&self.credentials);
                 let remote = None;
                 let connect_cancel = cancellation.clone();
+                let known_path = app_path.clone();
+                let approval = approval.clone();
                 let task = tokio::spawn(async move {
                     supervisor
                         .run(move || {
@@ -396,9 +576,18 @@ impl TunnelManager {
                             let credentials = Arc::clone(&credentials);
                             let cancellation = connect_cancel.clone();
                             let remote = remote.clone();
+                            let known_path = known_path.clone();
+                            let approval = approval.clone();
                             async move {
-                                let hops = build_hops(&hosts, credentials).await?;
-                                SshChain::connect(hops, remote, &cancellation).await
+                                let hops =
+                                    build_hops(&hosts, credentials, known_path.as_ref()).await?;
+                                SshChain::connect_with_approval(
+                                    hops,
+                                    remote,
+                                    &cancellation,
+                                    approval,
+                                )
+                                .await
                             }
                         })
                         .await
@@ -417,15 +606,26 @@ impl TunnelManager {
                 let retry_hint = supervisor.retry_handle();
                 let credentials = Arc::clone(&self.credentials);
                 let remote = tunnel.remote.clone();
+                let known_path = app_path.clone();
+                let approval = approval.clone();
                 let task = tokio::spawn(async move {
                     supervisor
                         .run(move |session_token| {
                             let hosts = Arc::clone(&hosts);
                             let credentials = Arc::clone(&credentials);
                             let remote = remote.clone();
+                            let known_path = known_path.clone();
+                            let approval = approval.clone();
                             async move {
-                                let hops = build_hops(&hosts, credentials).await?;
-                                SshChain::connect(hops, remote, &session_token).await
+                                let hops =
+                                    build_hops(&hosts, credentials, known_path.as_ref()).await?;
+                                SshChain::connect_with_approval(
+                                    hops,
+                                    remote,
+                                    &session_token,
+                                    approval,
+                                )
+                                .await
                             }
                         })
                         .await;
@@ -458,6 +658,12 @@ impl TunnelManager {
     }
 
     async fn refresh(&mut self) {
+        let previous_prompts = self.pending_host_keys.len();
+        self.pending_host_keys
+            .retain(|prompt| !prompt.reply.is_closed());
+        if self.pending_host_keys.len() != previous_prompts {
+            self.publish_host_keys();
+        }
         let mut changed = false;
         let mut finished = Vec::new();
         for (id, active) in &mut self.active {
@@ -507,12 +713,16 @@ impl TunnelManager {
 async fn build_hops(
     hosts: &[SshHost],
     credentials: Arc<dyn CredentialSource>,
+    app_known_hosts_path: Option<&PathBuf>,
 ) -> Result<Vec<HopSpec>, SshChainError> {
-    let known_hosts = std::env::var_os("USERPROFILE")
+    let mut known_hosts = std::env::var_os("USERPROFILE")
         .or_else(|| std::env::var_os("HOME"))
         .map(|home| PathBuf::from(home).join(".ssh").join("known_hosts"))
         .into_iter()
         .collect::<Vec<_>>();
+    if let Some(path) = app_known_hosts_path {
+        known_hosts.push(path.clone());
+    }
     let mut hops = Vec::with_capacity(hosts.len());
     for (ix, host) in hosts.iter().enumerate() {
         let credential = match &host.auth {
@@ -603,6 +813,7 @@ mod config_tests {
                         groups: Vec::new(),
                         tunnels: Vec::new()
                     },
+                    secret: None,
                     reply,
                 })
                 .is_ok()
@@ -615,6 +826,50 @@ mod config_tests {
                 .app
                 .minimize_to_tray
         );
+        handle.shutdown();
+        task.await.expect("manager shutdown");
+    }
+
+    #[tokio::test]
+    async fn host_key_prompt_reaches_ui_and_resolution_returns_to_handshake() {
+        let (manager, handle) = TunnelManager::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        let sender = manager.host_key_sender.clone();
+        let task = tokio::spawn(manager.run());
+        let mut views = handle.subscribe_host_keys();
+        let (reply, decision) = oneshot::channel();
+        assert!(
+            sender
+                .try_send(HostKeyPrompt {
+                    host: "example.test".into(),
+                    port: 22,
+                    algorithm: "ssh-ed25519".into(),
+                    fingerprint: "SHA256:test".into(),
+                    reply,
+                })
+                .is_ok()
+        );
+        views.changed().await.expect("prompt published");
+        let id = views.borrow_and_update()[0].id;
+        assert!(
+            handle
+                .try_send(CoreCommand::ResolveHostKey {
+                    id,
+                    decision: HostKeyDecision::TrustOnce
+                })
+                .is_ok()
+        );
+        assert_eq!(
+            decision.await.expect("handshake decision"),
+            HostKeyDecision::TrustOnce
+        );
+        views.changed().await.expect("prompt removed");
+        assert!(views.borrow_and_update().is_empty());
         handle.shutdown();
         task.await.expect("manager shutdown");
     }

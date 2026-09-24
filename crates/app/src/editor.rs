@@ -2,10 +2,12 @@ use std::{path::PathBuf, time::Duration};
 
 use gpui_kit::component::input::InputState;
 use gpui_kit::{AppContext as _, Context, Entity, Window};
+use tunnel_core::SecretUpdate;
 use tunnel_domain::{
     AuthConfig, GroupId, HostId, HostKeyPolicy, LocalEndpoint, RemoteEndpoint, RetryPolicy,
-    SshHost, TunnelConfig, TunnelId, TunnelMode,
+    SecretRef, SshHost, TunnelConfig, TunnelId, TunnelMode,
 };
+use zeroize::Zeroizing;
 
 pub struct HostEditor {
     pub id: HostId,
@@ -14,12 +16,16 @@ pub struct HostEditor {
     pub port: Entity<InputState>,
     pub username: Entity<InputState>,
     pub identity_file: Entity<InputState>,
+    pub agent_socket: Entity<InputState>,
+    pub password: Entity<InputState>,
+    pub passphrase: Entity<InputState>,
     pub notes: Entity<InputState>,
+    pub connect_timeout_ms: Entity<InputState>,
+    pub keepalive_interval_ms: Entity<InputState>,
+    pub keepalive_max: Entity<InputState>,
     pub auth: AuthConfig,
+    pub original_auth: AuthConfig,
     pub policy: HostKeyPolicy,
-    pub connect_timeout: Duration,
-    pub keepalive_interval: Duration,
-    pub keepalive_max: u32,
 }
 
 impl HostEditor {
@@ -53,44 +59,157 @@ impl HostEditor {
                 window,
                 cx,
             ),
+            agent_socket: text(
+                existing
+                    .and_then(|host| match &host.auth {
+                        AuthConfig::Agent { socket } => socket.as_deref(),
+                        _ => None,
+                    })
+                    .unwrap_or(""),
+                window,
+                cx,
+            ),
+            password: text("", window, cx),
+            passphrase: text("", window, cx),
             notes: text(existing.map_or("", |host| &host.notes), window, cx),
+            connect_timeout_ms: text(
+                &existing
+                    .map_or(Duration::from_secs(8), |host| host.connect_timeout)
+                    .as_millis()
+                    .to_string(),
+                window,
+                cx,
+            ),
+            keepalive_interval_ms: text(
+                &existing
+                    .map_or(Duration::from_secs(10), |host| host.keepalive_interval)
+                    .as_millis()
+                    .to_string(),
+                window,
+                cx,
+            ),
+            keepalive_max: text(
+                &existing.map_or(3, |host| host.keepalive_max).to_string(),
+                window,
+                cx,
+            ),
             auth: existing.map_or(AuthConfig::Agent { socket: None }, |host| host.auth.clone()),
+            original_auth: existing
+                .map_or(AuthConfig::Agent { socket: None }, |host| host.auth.clone()),
             policy: existing.map_or(HostKeyPolicy::Strict, |host| host.host_key_policy),
-            connect_timeout: existing.map_or(Duration::from_secs(8), |host| host.connect_timeout),
-            keepalive_interval: existing
-                .map_or(Duration::from_secs(10), |host| host.keepalive_interval),
-            keepalive_max: existing.map_or(3, |host| host.keepalive_max),
         }
     }
 
-    pub fn collect(&self, cx: &Context<crate::workspace::Workspace>) -> Result<SshHost, String> {
+    pub fn collect(
+        &self,
+        cx: &Context<crate::workspace::Workspace>,
+    ) -> Result<(SshHost, Option<SecretUpdate>), String> {
         let port = self
             .port
             .read(cx)
             .value()
             .parse::<u16>()
             .map_err(|_| "SSH port must be between 1 and 65535")?;
+        let mut secret_update = None;
         let auth = match &self.auth {
+            AuthConfig::Password { credential_ref } => {
+                let password = self.password.read(cx).value().to_string();
+                if password.is_empty() && credential_ref.0 == "pending" {
+                    return Err("Enter a password before saving".into());
+                }
+                let reference = if password.is_empty() {
+                    credential_ref.clone()
+                } else {
+                    let reference = new_secret_ref();
+                    secret_update = Some(SecretUpdate {
+                        reference: reference.clone(),
+                        value: Zeroizing::new(password),
+                    });
+                    reference
+                };
+                AuthConfig::Password {
+                    credential_ref: reference,
+                }
+            }
             AuthConfig::PrivateKey { passphrase_ref, .. } => AuthConfig::PrivateKey {
-                key_path: PathBuf::from(self.identity_file.read(cx).value().to_string()),
-                passphrase_ref: passphrase_ref.clone(),
+                key_path: {
+                    let path = self.identity_file.read(cx).value().to_string();
+                    if path.trim().is_empty() {
+                        return Err("Choose a private key file".into());
+                    }
+                    PathBuf::from(path)
+                },
+                passphrase_ref: {
+                    let passphrase = self.passphrase.read(cx).value().to_string();
+                    if passphrase.is_empty() {
+                        passphrase_ref.clone()
+                    } else {
+                        let reference = new_secret_ref();
+                        secret_update = Some(SecretUpdate {
+                            reference: reference.clone(),
+                            value: Zeroizing::new(passphrase),
+                        });
+                        Some(reference)
+                    }
+                },
             },
+            AuthConfig::Agent { .. } => {
+                let socket = self
+                    .agent_socket
+                    .read(cx)
+                    .value()
+                    .to_string()
+                    .trim()
+                    .to_owned();
+                AuthConfig::Agent {
+                    socket: if socket.is_empty() {
+                        None
+                    } else {
+                        Some(socket)
+                    },
+                }
+            }
             other => other.clone(),
         };
-        Ok(SshHost {
-            id: self.id.clone(),
-            name: self.name.read(cx).value().to_string().trim().to_owned(),
-            hostname: self.hostname.read(cx).value().to_string().trim().to_owned(),
-            port,
-            username: self.username.read(cx).value().to_string().trim().to_owned(),
-            auth,
-            host_key_policy: self.policy,
-            connect_timeout: self.connect_timeout,
-            keepalive_interval: self.keepalive_interval,
-            keepalive_max: self.keepalive_max,
-            notes: self.notes.read(cx).value().to_string(),
-        })
+        let connect_timeout_ms = self
+            .connect_timeout_ms
+            .read(cx)
+            .value()
+            .parse::<u64>()
+            .map_err(|_| "Connect timeout must be a number of milliseconds")?;
+        let keepalive_interval_ms = self
+            .keepalive_interval_ms
+            .read(cx)
+            .value()
+            .parse::<u64>()
+            .map_err(|_| "Keepalive interval must be a number of milliseconds")?;
+        let keepalive_max = self
+            .keepalive_max
+            .read(cx)
+            .value()
+            .parse::<u32>()
+            .map_err(|_| "Keepalive max must be a number")?;
+        Ok((
+            SshHost {
+                id: self.id.clone(),
+                name: self.name.read(cx).value().to_string().trim().to_owned(),
+                hostname: self.hostname.read(cx).value().to_string().trim().to_owned(),
+                port,
+                username: self.username.read(cx).value().to_string().trim().to_owned(),
+                auth,
+                host_key_policy: self.policy,
+                connect_timeout: Duration::from_millis(connect_timeout_ms),
+                keepalive_interval: Duration::from_millis(keepalive_interval_ms),
+                keepalive_max,
+                notes: self.notes.read(cx).value().to_string(),
+            },
+            secret_update,
+        ))
     }
+}
+
+fn new_secret_ref() -> SecretRef {
+    SecretRef(format!("credential-{:032x}", rand::random::<u128>()))
 }
 
 pub struct TunnelEditor {

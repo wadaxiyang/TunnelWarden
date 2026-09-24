@@ -54,13 +54,21 @@ impl ConfigStore {
 
     pub fn load(&self) -> Result<DomainConfig, ConfigStoreError> {
         let path = self.directory.join("config.toml");
-        let file = match File::open(&path) {
-            Ok(file) => file,
+        match File::open(&path) {
+            Ok(file) => Self::read_file(path, file),
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
-                return Ok(ConfigDocument::default().into_domain()?);
+                Ok(ConfigDocument::default().into_domain()?)
             }
-            Err(source) => return Err(io_error(path, source)),
-        };
+            Err(source) => Err(io_error(path, source)),
+        }
+    }
+
+    pub fn import_file(path: &Path) -> Result<DomainConfig, ConfigStoreError> {
+        let file = File::open(path).map_err(|source| io_error(path.to_path_buf(), source))?;
+        Self::read_file(path.to_path_buf(), file)
+    }
+
+    fn read_file(path: PathBuf, file: File) -> Result<DomainConfig, ConfigStoreError> {
         let mut bytes = String::new();
         file.take(MAX_CONFIG_BYTES + 1)
             .read_to_string(&mut bytes)
@@ -70,6 +78,31 @@ impl ConfigStore {
         }
         let document: ConfigDocument = toml::from_str(&bytes)?;
         Ok(document.into_domain()?)
+    }
+
+    /// Export contains only config records and opaque keyring references.
+    /// The keyring's password and private-key passphrase values are never read.
+    pub fn export_file(path: &Path, config: DomainConfig) -> Result<(), ConfigStoreError> {
+        let document = ConfigDocument::try_from(config)?;
+        document.clone().into_domain()?;
+        let serialized = toml::to_string_pretty(&document)?;
+        if serialized.len() as u64 > MAX_CONFIG_BYTES {
+            return Err(ConfigStoreError::TooLarge);
+        }
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+            .map_err(|source| io_error(path.to_path_buf(), source))?;
+        if let Err(source) = file
+            .write_all(serialized.as_bytes())
+            .and_then(|()| file.sync_all())
+        {
+            drop(file);
+            let _ = fs::remove_file(path);
+            return Err(io_error(path.to_path_buf(), source));
+        }
+        Ok(())
     }
 
     /// Writes a validated schema-v1 document through a synced temporary file.
@@ -295,5 +328,22 @@ description = "Primary SOCKS5 proxy"
             fs::read(directory.path().join("config.toml")).expect("read preserved"),
             before
         );
+    }
+
+    #[test]
+    fn export_import_roundtrip_does_not_overwrite_existing_file() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = directory.path().join("tunnelwarden-config.toml");
+        let config = ConfigDocument::default()
+            .into_domain()
+            .expect("default config");
+        ConfigStore::export_file(&path, config).expect("export");
+        assert!(ConfigStore::import_file(&path).is_ok());
+        let before = fs::read(&path).expect("read export");
+        let config = ConfigDocument::default()
+            .into_domain()
+            .expect("default config");
+        assert!(ConfigStore::export_file(&path, config).is_err());
+        assert_eq!(fs::read(&path).expect("read preserved export"), before);
     }
 }

@@ -2,6 +2,7 @@
 
 mod schema;
 mod secrets;
+mod ssh_import;
 mod store;
 
 pub use schema::{
@@ -9,4 +10,5 @@ pub use schema::{
     HostRecord, SCHEMA_VERSION, ThemePreference, TunnelRecord,
 };
 pub use secrets::{SecretStore, SecretStoreError};
+pub use ssh_import::{SshImportEntry, SshImportError, SshImportPreview, preview_ssh_config};
 pub use store::{ConfigStore, ConfigStoreError};

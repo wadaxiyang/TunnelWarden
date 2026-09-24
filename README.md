@@ -12,44 +12,24 @@ A native Rust GUI that keeps SSH tunnels alive.
 
 ## Development status
 
-This repository is at the beginning of the internal work packages in
-[TunnelWarden_SPEC.md](TunnelWarden_SPEC.md). It currently contains the Rust
-workspace, domain types, a pure lifecycle state machine, and a Local/Dynamic
-listener owner. Tests bind a real loopback port, confirm a conflict is reported,
-and confirm Stop releases the port. The `ssh-engine` crate now uses `russh`
-0.63.x for direct password, private-key (including encrypted keys), and SSH
-agent authentication, strict OpenSSH `known_hosts` checks, and session ping;
-integration tests run against an
-in-process SSH server. Local and Dynamic SOCKS5 forwarding now send real bytes
-from loopback listeners through authenticated `direct-tcpip` channels. Dynamic
-mode supports SOCKS5 CONNECT with IPv4, IPv6, and domain destinations; domains
-are passed unchanged to the SSH server for remote DNS. The worker bounds and
-joins connection tasks, counts traffic, and releases its port on Stop. An
-in-process SSH integration test covers both modes. Remote forwarding also
-registers `tcpip-forward`, relays server-opened `forwarded-tcpip` channels to a
-local target, and cancels the registration during Stop. Its integration test
-checks data flow and cancellation acknowledgement. A two-hop Jump Chain now
-performs later SSH handshakes through the preceding hop's `direct-tcpip` channel
-and keeps all sessions owned until disconnect. Two- and three-hop integration
-tests confirm authenticated final-hop traffic. The Local/Dynamic supervisor
-now retries with bounded jitter and keeps its listener bound across SSH loss;
-an integration test forces a disconnect and confirms traffic recovers on the
-same port. Remote supervision re-registers forwarding after SSH loss and
-cancels the remote registration on Stop. A GPUI Kit application shell now reads
-saved configuration and displays Overview, Jumpers, Tunnels, Logs and Settings.
-Tunnels can be started, stopped, and retried through a Tokio-owned single-writer
-manager, and configured auto-start tunnels start with the runtime. Editors and
-other desktop integration remain in progress. Manual retry interrupts a
-backoff or blocked wait without releasing a Local/Dynamic listener; a network
-recovery command is available for the platform layer to send. The GUI now
-shows Degraded after a failed ping and restores Healthy when ping recovers.
-Configuration storage now
-loads and saves schema-v1 TOML with a 4 MiB read limit, a synced temporary file,
-atomic replacement, and five backups. Secrets are read from the OS keyring by
-reference on a blocking worker, never from TOML. A Windows named-pipe test
-Agent now verifies key signing, authentication, and forwarded channel bytes.
-The GUI uses GPUI Kit 0.6.6 and Rust 1.98.1. None of
-the v1.0 release gates should be considered passed.
+The Rust workspace implements real `russh` connections with password,
+private-key and Windows SSH Agent authentication; strict host-key checking with
+an in-app trust prompt; local, remote and dynamic SOCKS5 forwarding; two- and
+three-hop Jump Chains; bounded reconnect supervisors; and SSH session health
+checks. Integration tests use an in-process SSH server and exercise bytes over
+forwarded channels, reconnect, host-key approval and listener release.
+
+The Windows GPUI Kit app has structured jumper and tunnel editors, a tray,
+single-instance wakeup, network change notifications, versioned TOML storage,
+OS keyring-backed secrets, and import/export with previews. OpenSSH config
+import previews supported fields, conflicts and unmapped directives before
+adding jumpers. The `ProxyJump` directive is shown as a warning because imported
+jumpers do not automatically become tunnel Jump Chains.
+
+This is still an internal development build. The full v1.0 gates in
+[TunnelWarden_SPEC.md](TunnelWarden_SPEC.md) include a 24-hour soak, 1000 real
+reconnects, UI interaction checks, startup integration and an audit review.
+Passing a shorter test does not imply those gates have passed.
 
 ## Local checks
 
@@ -57,6 +37,7 @@ the v1.0 release gates should be considered passed.
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+pwsh -NoProfile -File scripts/release-memory-probe.ps1 -Cycles 30
 ```
 
 ## Architecture

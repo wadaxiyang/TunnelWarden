@@ -22,13 +22,24 @@ pub enum ThemePreference {
     Dark,
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AppSettings {
     pub theme: ThemePreference,
     pub run_at_startup: bool,
     pub minimize_to_tray: bool,
     pub traffic_monitor: bool,
+}
+
+impl Default for AppSettings {
+    fn default() -> Self {
+        Self {
+            theme: ThemePreference::System,
+            run_at_startup: false,
+            minimize_to_tray: true,
+            traffic_monitor: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

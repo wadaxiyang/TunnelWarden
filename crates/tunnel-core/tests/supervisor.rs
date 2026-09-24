@@ -14,7 +14,7 @@ use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::oneshot,
+    sync::mpsc,
     time::timeout,
 };
 use tokio_util::sync::CancellationToken;
@@ -68,6 +68,15 @@ impl server::Handler for EchoServer {
 
 #[tokio::test]
 async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
+    let stress_cycles = std::env::var("TUNNELWARDEN_RECONNECT_CYCLES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 1000));
+    let soak_hours = std::env::var("TUNNELWARDEN_SOAK_HOURS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|value| value.clamp(1, 24));
+    let reconnect_cycles = soak_hours.or(stress_cycles).unwrap_or(1);
     let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("host key");
     let public_key = key.public_key().clone();
     let mut config = server::Config::default();
@@ -77,18 +86,15 @@ async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
         .await
         .expect("SSH listener");
     let ssh_address = ssh_listener.local_addr().expect("SSH address");
-    let (disconnect_first, drop_first) = oneshot::channel::<()>();
+    let (disconnect, mut disconnect_requests) = mpsc::channel::<()>(1);
     let server_task = tokio::spawn(async move {
-        let mut drop_first = Some(drop_first);
-        for index in 0..2 {
+        for index in 0..=reconnect_cycles {
             let (socket, _) = ssh_listener.accept().await.expect("SSH accept");
             let session = server::run_stream(Arc::clone(&config), socket, EchoServer)
                 .await
                 .expect("SSH session");
-            if index == 0 {
-                if let Some(signal) = drop_first.take() {
-                    let _ = signal.await;
-                }
+            if index < reconnect_cycles {
+                let _ = disconnect_requests.recv().await;
                 let _ = session
                     .handle()
                     .disconnect(
@@ -135,12 +141,25 @@ async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
     let root = CancellationToken::new();
     let supervisor = LocalForwardSupervisor::new(
         listener,
-        SupervisorMode::Local(RemoteEndpoint {
-            host: "echo.internal".into(),
-            port: 7000,
-        }),
+        if soak_hours.is_some() {
+            SupervisorMode::Dynamic
+        } else {
+            SupervisorMode::Local(RemoteEndpoint {
+                host: "echo.internal".into(),
+                port: 7000,
+            })
+        },
         root.clone(),
-        RetryPolicy::default(),
+        if stress_cycles.is_some() && soak_hours.is_none() {
+            RetryPolicy {
+                base_delay: Duration::from_millis(20),
+                max_delay: Duration::from_millis(30),
+                reset_after_healthy: Duration::from_millis(1),
+                jitter_percent: 0,
+            }
+        } else {
+            RetryPolicy::default()
+        },
     )
     .expect("supervisor");
     let local_address = supervisor
@@ -171,15 +190,25 @@ async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
             .await
     });
     wait_for_healthy(&mut state).await;
-    assert_echo(local_address, b"before reconnect").await;
-    disconnect_first.send(()).expect("disconnect signal");
-    wait_for_reconnecting(&mut state).await;
-    assert!(
-        StdTcpListener::bind(local_address).is_err(),
-        "listener was released during reconnect"
-    );
-    wait_for_healthy(&mut state).await;
-    assert_echo(local_address, b"after reconnect").await;
+    assert_traffic(local_address, b"before reconnect", soak_hours.is_some()).await;
+    for cycle in 0..reconnect_cycles {
+        if soak_hours.is_some() {
+            for _ in 0..60 {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                assert_traffic(local_address, b"periodic soak traffic", true).await;
+            }
+        }
+        disconnect.send(()).await.expect("disconnect signal");
+        wait_for_reconnecting(&mut state).await;
+        assert!(
+            StdTcpListener::bind(local_address).is_err(),
+            "listener was released during reconnect {cycle}"
+        );
+        wait_for_healthy(&mut state).await;
+        if cycle % 100 == 0 || cycle + 1 == reconnect_cycles {
+            assert_traffic(local_address, b"after reconnect", soak_hours.is_some()).await;
+        }
+    }
     root.cancel();
     timeout(Duration::from_secs(10), supervisor_task)
         .await
@@ -266,6 +295,43 @@ async fn wait_for_reconnecting(state: &mut tokio::sync::watch::Receiver<Supervis
     })
     .await
     .expect("reconnect deadline");
+}
+
+async fn assert_traffic(address: SocketAddr, payload: &[u8], socks: bool) {
+    if socks {
+        assert_socks_echo(address, payload).await;
+    } else {
+        assert_echo(address, payload).await;
+    }
+}
+
+async fn assert_socks_echo(address: SocketAddr, payload: &[u8]) {
+    timeout(Duration::from_secs(5), async {
+        let mut client = TcpStream::connect(address).await.expect("SOCKS connect");
+        client.write_all(&[5, 1, 0]).await.expect("SOCKS greeting");
+        let mut method = [0u8; 2];
+        client.read_exact(&mut method).await.expect("SOCKS method");
+        assert_eq!(method, [5, 0]);
+        let destination = b"echo.internal";
+        client
+            .write_all(&[5, 1, 0, 3, destination.len() as u8])
+            .await
+            .expect("SOCKS CONNECT");
+        client.write_all(destination).await.expect("SOCKS domain");
+        client
+            .write_all(&7000u16.to_be_bytes())
+            .await
+            .expect("SOCKS destination port");
+        let mut reply = [0u8; 10];
+        client.read_exact(&mut reply).await.expect("SOCKS reply");
+        assert_eq!(reply[0..4], [5, 0, 0, 1]);
+        client.write_all(payload).await.expect("SOCKS traffic");
+        let mut received = vec![0; payload.len()];
+        client.read_exact(&mut received).await.expect("SOCKS echo");
+        assert_eq!(received, payload);
+    })
+    .await
+    .expect("SOCKS traffic deadline");
 }
 
 async fn assert_echo(address: SocketAddr, payload: &[u8]) {

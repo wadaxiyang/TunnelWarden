@@ -16,3 +16,6 @@ russh = { version = "=0.63.3", default-features = false, features = ["ring"] }
 zeroize = "1"
 tracing = "0.1"
 toml = "=0.9.12"
+
+[patch.crates-io]
+gpui-pre-windows = { path = "vendor/gpui-pre-windows" }

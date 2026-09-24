@@ -9,6 +9,6 @@ pub use chain::{HopSpec, SshChain, SshChainError};
 pub use client::{
     DirectSshSession, ForwardingFailure, RemoteForwardRegistration, SshConnectError, SshCredential,
 };
-pub use host_key::HostKeyError;
+pub use host_key::{HostKeyApproval, HostKeyDecision, HostKeyError, HostKeyPrompt};
 
 pub type DirectTcpStream = russh::ChannelStream<russh::client::Msg>;

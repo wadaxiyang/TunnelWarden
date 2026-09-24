@@ -3,22 +3,25 @@ use std::{
     sync::Arc,
 };
 
-use config_store::{ConfigDocument, ConfigStoreError, DomainConfig};
+use config_store::{ConfigDocument, DomainConfig, SshImportPreview};
 use gpui_kit::base::{Disableable, Selectable, StyledExt};
 use gpui_kit::component::{
     ActiveTheme,
     button::{Button, ButtonVariants},
-    input::Input,
+    input::{Input, InputContentType},
     scroll::ScrollableElement,
 };
 use gpui_kit::{
-    AsyncApp, Context, IntoElement, ParentElement as _, Render, Styled as _, Task, Window, div,
-    rems,
+    AsyncApp, Context, IntoElement, ParentElement as _, PathPromptOptions, Render, Styled as _,
+    Task, Window, div, rems,
 };
 use tokio::sync::oneshot;
-use tunnel_core::{CoreCommand, ManagerHandle, ManagerSnapshot, SupervisorState};
+use tunnel_core::{
+    CoreCommand, HostKeyDecision, HostKeyPromptView, ManagerHandle, ManagerSnapshot, SecretUpdate,
+    SupervisorState,
+};
 use tunnel_domain::TunnelMode;
-use tunnel_domain::{AuthConfig, HostId, HostKeyPolicy, TunnelId};
+use tunnel_domain::{AuthConfig, HostId, HostKeyPolicy, SecretRef, TunnelId};
 
 use crate::editor::{Editor, HostEditor, TunnelEditor};
 
@@ -54,14 +57,22 @@ pub struct Workspace {
     command_error: Option<String>,
     runtime_error: Option<String>,
     _updates: Option<Task<()>>,
+    _host_key_updates: Option<Task<()>>,
+    host_key_prompts: Arc<Vec<HostKeyPromptView>>,
     editor: Option<Editor>,
     saving: bool,
     _save_task: Option<Task<()>>,
+    _file_task: Option<Task<()>>,
+    file_busy: bool,
+    import_preview: Option<DomainConfig>,
+    ssh_preview: Option<SshImportPreview>,
+    ssh_selected: Vec<bool>,
+    file_message: Option<String>,
 }
 
 impl Workspace {
     pub fn new(
-        startup: Result<(PathBuf, DomainConfig), ConfigStoreError>,
+        startup: Result<(PathBuf, DomainConfig), String>,
         manager: Option<ManagerHandle>,
         runtime_error: Option<String>,
         _window: &mut Window,
@@ -89,18 +100,48 @@ impl Workspace {
             }
             None => (Arc::new(ManagerSnapshot::new()), None),
         };
+        let (host_key_prompts, host_key_updates) = match &manager {
+            Some(manager) => {
+                let mut state = manager.subscribe_host_keys();
+                let prompts = Arc::clone(&state.borrow_and_update());
+                let updates = cx.spawn(async move |this, cx: &mut AsyncApp| {
+                    while state.changed().await.is_ok() {
+                        let latest = Arc::clone(&state.borrow_and_update());
+                        if this
+                            .update(cx, |view, cx| {
+                                view.host_key_prompts = latest;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                (prompts, Some(updates))
+            }
+            None => (Arc::new(Vec::new()), None),
+        };
         Self {
             page: Page::Overview,
             page_index: 0,
-            startup: startup.map_err(|error| error.to_string()),
+            startup,
             manager,
             snapshot,
             command_error: None,
             runtime_error,
             _updates: updates,
+            _host_key_updates: host_key_updates,
+            host_key_prompts,
             editor: None,
             saving: false,
             _save_task: None,
+            _file_task: None,
+            file_busy: false,
+            import_preview: None,
+            ssh_preview: None,
+            ssh_selected: Vec::new(),
+            file_message: None,
         }
     }
 
@@ -184,8 +225,10 @@ impl Workspace {
         };
         let directory = directory.clone();
         let mut config = current.clone();
+        let mut secret = None;
         let edit = match editor {
-            Editor::Host(editor) => editor.collect(cx).map(|host| {
+            Editor::Host(editor) => editor.collect(cx).map(|(host, update)| {
+                secret = update;
                 if let Some(index) = config.hosts.iter().position(|old| old.id == host.id) {
                     config.hosts[index] = host;
                 } else {
@@ -212,6 +255,16 @@ impl Workspace {
             cx.notify();
             return;
         }
+        self.persist_config(directory, config, secret, cx);
+    }
+
+    fn persist_config(
+        &mut self,
+        directory: PathBuf,
+        config: DomainConfig,
+        secret: Option<SecretUpdate>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(manager) = &self.manager else {
             self.command_error = Some("Tunnel runtime is unavailable".into());
             cx.notify();
@@ -221,6 +274,7 @@ impl Workspace {
         if let Err(error) = manager.try_send(CoreCommand::SaveConfig {
             directory: directory.clone(),
             config: config.clone(),
+            secret,
             reply,
         }) {
             self.command_error = Some(error.to_string());
@@ -239,6 +293,8 @@ impl Workspace {
                     Ok(()) => {
                         view.startup = Ok((directory, config));
                         view.editor = None;
+                        view.import_preview = None;
+                        view.ssh_preview = None;
                         view.command_error = None;
                     }
                     Err(error) => view.command_error = Some(error),
@@ -256,6 +312,209 @@ impl Workspace {
                 .err()
                 .map(|error| error.to_string())
         });
+        cx.notify();
+    }
+
+    fn choose_import(&mut self, cx: &mut Context<Self>) {
+        if self.file_busy {
+            return;
+        }
+        let Some(manager) = self.manager.clone() else {
+            self.file_message = Some("Tunnel runtime is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import TunnelWarden configuration".into()),
+        });
+        self.file_busy = true;
+        self._file_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let result = match picker.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(path) => {
+                        let (reply, answer) = oneshot::channel();
+                        match manager.try_send(CoreCommand::ImportConfig { path, reply }) {
+                            Ok(()) => answer.await.unwrap_or_else(|_| Err("Configuration manager stopped".into())).map(Some),
+                            Err(error) => Err(error.to_owned()),
+                        }
+                    }
+                    None => Ok(None),
+                },
+                Ok(Ok(None)) => Ok(None),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = this.update(cx, |view, cx| {
+                view.file_busy = false;
+                match result {
+                    Ok(Some(config)) => {
+                        view.file_message = Some(format!("Import preview: {} jumpers, {} tunnels. Existing configuration will be replaced after confirmation.", config.hosts.len(), config.tunnels.len()));
+                        view.import_preview = Some(config);
+                    }
+                    Ok(None) => {},
+                    Err(error) => view.file_message = Some(error),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn confirm_import(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        let Some(config) = self.import_preview.clone() else {
+            return;
+        };
+        let Ok((directory, _)) = &self.startup else {
+            return;
+        };
+        self.persist_config(directory.clone(), config, None, cx);
+    }
+
+    fn choose_ssh_import(&mut self, cx: &mut Context<Self>) {
+        if self.file_busy {
+            return;
+        }
+        let Some(manager) = self.manager.clone() else {
+            return;
+        };
+        let picker = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import OpenSSH config".into()),
+        });
+        self.file_busy = true;
+        self._file_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let result = match picker.await {
+                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
+                    Some(path) => {
+                        let (reply, answer) = oneshot::channel();
+                        match manager.try_send(CoreCommand::PreviewSshConfig { path, reply }) {
+                            Ok(()) => answer.await.unwrap_or_else(|_| Err("Configuration manager stopped".into())).map(Some),
+                            Err(error) => Err(error.to_owned()),
+                        }
+                    }
+                    None => Ok(None),
+                },
+                Ok(Ok(None)) => Ok(None),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = this.update(cx, |view, cx| {
+                view.file_busy = false;
+                match result {
+                    Ok(Some(preview)) => {
+                        view.ssh_selected = preview.entries.iter().map(|entry| {
+                            let conflict = view.startup.as_ref().ok().is_some_and(|(_, config)| config.hosts.iter().any(|host| host.id == entry.host.id || host.name == entry.host.name));
+                            !conflict && !entry.host.username.is_empty()
+                        }).collect();
+                        view.ssh_preview = Some(preview);
+                        view.page_index = 0;
+                        view.import_preview = None;
+                        view.file_message = Some("Select jumpers to add, then confirm. Existing jumpers will be preserved.".into());
+                    }
+                    Ok(None) => {},
+                    Err(error) => view.file_message = Some(error),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    fn confirm_ssh_import(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        let (Some(preview), Ok((directory, current))) = (&self.ssh_preview, &self.startup) else {
+            return;
+        };
+        let mut config = current.clone();
+        for (entry, selected) in preview.entries.iter().zip(&self.ssh_selected) {
+            if !selected {
+                continue;
+            }
+            if entry.host.username.is_empty()
+                || config
+                    .hosts
+                    .iter()
+                    .any(|host| host.id == entry.host.id || host.name == entry.host.name)
+            {
+                self.command_error = Some(format!(
+                    "Resolve conflict or missing user for {}",
+                    entry.alias
+                ));
+                cx.notify();
+                return;
+            }
+            config.hosts.push(entry.host.clone());
+        }
+        if let Err(error) =
+            ConfigDocument::try_from(config.clone()).and_then(ConfigDocument::into_domain)
+        {
+            self.command_error = Some(error.to_string());
+            cx.notify();
+            return;
+        }
+        self.persist_config(directory.clone(), config, None, cx);
+    }
+
+    fn choose_export(&mut self, cx: &mut Context<Self>) {
+        if self.file_busy {
+            return;
+        }
+        let Some(manager) = self.manager.clone() else {
+            self.file_message = Some("Tunnel runtime is unavailable".into());
+            cx.notify();
+            return;
+        };
+        let Ok((directory, config)) = &self.startup else {
+            return;
+        };
+        let config = config.clone();
+        let picker = cx.prompt_for_new_path(directory, Some("tunnelwarden-config.toml"));
+        self.file_busy = true;
+        self._file_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let result = match picker.await {
+                Ok(Ok(Some(path))) => {
+                    let (reply, answer) = oneshot::channel();
+                    match manager.try_send(CoreCommand::ExportConfig {
+                        path: path.clone(),
+                        config,
+                        reply,
+                    }) {
+                        Ok(()) => answer
+                            .await
+                            .unwrap_or_else(|_| Err("Configuration manager stopped".into()))
+                            .map(|_| Some(path)),
+                        Err(error) => Err(error.to_owned()),
+                    }
+                }
+                Ok(Ok(None)) => Ok(None),
+                Ok(Err(error)) => Err(error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            let _ = this.update(cx, |view, cx| {
+                view.file_busy = false;
+                match result {
+                    Ok(Some(path)) => {
+                        view.file_message = Some(format!(
+                            "Exported to {}. Passwords and passphrases were not included.",
+                            path.display()
+                        ))
+                    }
+                    Ok(None) => {}
+                    Err(error) => view.file_message = Some(error),
+                }
+                cx.notify();
+            });
+        }));
         cx.notify();
     }
 
@@ -325,6 +584,11 @@ impl Workspace {
                     .font_semibold()
                     .child(self.page.title()),
             );
+        let content = if let Some(prompt) = self.host_key_prompts.first() {
+            content.child(self.render_host_key_prompt(prompt, cx))
+        } else {
+            content
+        };
         let body = match &self.startup {
             Ok((_, config)) if self.editor.is_some() => self.render_editor(config, cx),
             Ok((directory, config)) => self.render_page(directory, config, cx),
@@ -354,6 +618,82 @@ impl Workspace {
         } else {
             content
         }
+    }
+
+    fn render_host_key_prompt(
+        &self,
+        prompt: &HostKeyPromptView,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let id = prompt.id;
+        div()
+            .p_4()
+            .mx_6()
+            .mt_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .border_1()
+            .border_color(cx.theme().warning)
+            .child(
+                div()
+                    .font_semibold()
+                    .child("The authenticity of this SSH host cannot be established"),
+            )
+            .child(format!(
+                "{}:{} · {} · {}",
+                prompt.host, prompt.port, prompt.algorithm, prompt.fingerprint
+            ))
+            .child(format!(
+                "{} pending host key confirmation(s)",
+                self.host_key_prompts.len()
+            ))
+            .child(
+                div()
+                    .flex()
+                    .gap_2()
+                    .child(
+                        Button::new(format!("trust-once-{id}"))
+                            .label("Trust Once")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request(
+                                    CoreCommand::ResolveHostKey {
+                                        id,
+                                        decision: HostKeyDecision::TrustOnce,
+                                    },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("trust-save-{id}"))
+                            .primary()
+                            .label("Trust & Save")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request(
+                                    CoreCommand::ResolveHostKey {
+                                        id,
+                                        decision: HostKeyDecision::TrustAndSave,
+                                    },
+                                    cx,
+                                )
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("trust-cancel-{id}"))
+                            .label("Cancel")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.request(
+                                    CoreCommand::ResolveHostKey {
+                                        id,
+                                        decision: HostKeyDecision::Cancel,
+                                    },
+                                    cx,
+                                )
+                            })),
+                    ),
+            )
+            .into_any_element()
     }
 
     fn render_page(
@@ -406,15 +746,211 @@ impl Workspace {
                 .p_6()
                 .child("No runtime events yet")
                 .into_any_element(),
-            Page::Settings => div()
-                .p_6()
-                .flex()
-                .flex_col()
-                .gap_3()
-                .child("Configuration folder")
-                .child(directory.display().to_string())
-                .into_any_element(),
+            Page::Settings => self.render_settings(directory, config, cx),
         }
+    }
+
+    fn render_settings(
+        &self,
+        directory: &Path,
+        config: &DomainConfig,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let mut body = div()
+            .p_6()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .child("Configuration folder")
+            .child(directory.display().to_string())
+            .child(
+                Button::new("close-mode")
+                    .label(if config.app.minimize_to_tray {
+                        "Close window: keep tunnels in tray"
+                    } else {
+                        "Close window: quit application"
+                    })
+                    .disabled(self.saving)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let Ok((directory, current)) = &this.startup else {
+                            return;
+                        };
+                        let mut config = current.clone();
+                        config.app.minimize_to_tray = !config.app.minimize_to_tray;
+                        this.persist_config(directory.clone(), config, None, cx);
+                    })),
+            )
+            .child(
+                Button::new("import-config")
+                    .label("Import TunnelWarden config…")
+                    .disabled(self.file_busy || self.saving)
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_import(cx))),
+            )
+            .child(
+                Button::new("export-config")
+                    .label("Export config…")
+                    .disabled(self.file_busy || self.saving)
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_export(cx))),
+            )
+            .child(
+                Button::new("import-ssh-config")
+                    .label("Import OpenSSH config…")
+                    .disabled(self.file_busy || self.saving)
+                    .on_click(cx.listener(|this, _, _, cx| this.choose_ssh_import(cx))),
+            );
+        if let Some(message) = &self.file_message {
+            body = body.child(message.clone());
+        }
+        if !config.app.minimize_to_tray {
+            body = body.child(
+                div()
+                    .text_color(cx.theme().danger)
+                    .child("Closing the window will stop all tunnels and quit TunnelWarden."),
+            );
+        }
+        if let Some(preview) = &self.import_preview {
+            body = body.child(div().font_semibold().child("Import preview"));
+            for host in preview.hosts.iter().take(PAGE_SIZE) {
+                body = body.child(format!(
+                    "{} · {}@{}:{}",
+                    host.name, host.username, host.hostname, host.port
+                ));
+            }
+            if preview.hosts.len() > PAGE_SIZE {
+                body = body.child(format!(
+                    "… {} more jumpers",
+                    preview.hosts.len() - PAGE_SIZE
+                ));
+            }
+            body = body
+                .child(format!(
+                    "{} tunnels will be imported",
+                    preview.tunnels.len()
+                ))
+                .child(
+                    Button::new("confirm-import")
+                        .primary()
+                        .label("Replace configuration")
+                        .disabled(self.saving)
+                        .on_click(cx.listener(|this, _, _, cx| this.confirm_import(cx))),
+                )
+                .child(
+                    Button::new("cancel-import")
+                        .label("Cancel import")
+                        .disabled(self.saving)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.import_preview = None;
+                            this.file_message = None;
+                            cx.notify();
+                        })),
+                );
+        }
+        if let Some(preview) = &self.ssh_preview {
+            body = body.child(div().font_semibold().child("OpenSSH import preview"));
+            for warning in preview.warnings.iter().take(8) {
+                body = body.child(div().text_color(cx.theme().warning).child(warning.clone()));
+            }
+            for (index, entry) in preview
+                .entries
+                .iter()
+                .enumerate()
+                .skip(self.page_index * PAGE_SIZE)
+                .take(PAGE_SIZE)
+            {
+                let conflict = config
+                    .hosts
+                    .iter()
+                    .any(|host| host.id == entry.host.id || host.name == entry.host.name);
+                let selected = self.ssh_selected.get(index).copied().unwrap_or(false);
+                let status = if conflict {
+                    "Duplicate"
+                } else if entry.host.username.is_empty() {
+                    "Needs user"
+                } else if !entry.warnings.is_empty() {
+                    "Warnings"
+                } else {
+                    "Ready"
+                };
+                body = body.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Button::new(format!("ssh-import-{index}"))
+                                .label(if selected { "✓ Import" } else { "Skip" })
+                                .selected(selected)
+                                .disabled(conflict || entry.host.username.is_empty() || self.saving)
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(selected) = this.ssh_selected.get_mut(index) {
+                                        *selected = !*selected;
+                                    }
+                                    cx.notify();
+                                })),
+                        )
+                        .child(format!(
+                            "{} → {}@{}:{} · {} · {}",
+                            entry.alias,
+                            entry.host.username,
+                            entry.host.hostname,
+                            entry.host.port,
+                            entry.proxy_jump.as_deref().unwrap_or("direct"),
+                            status
+                        )),
+                );
+                for warning in entry.warnings.iter().take(3) {
+                    body = body.child(div().text_color(cx.theme().warning).child(warning.clone()));
+                }
+            }
+            if preview.entries.len() > PAGE_SIZE {
+                let pages = preview.entries.len().div_ceil(PAGE_SIZE);
+                body = body.child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .child(
+                            Button::new("ssh-prev")
+                                .label("Previous")
+                                .disabled(self.page_index == 0)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.page_index = this.page_index.saturating_sub(1);
+                                    cx.notify();
+                                })),
+                        )
+                        .child(format!("Page {} of {}", self.page_index + 1, pages))
+                        .child(
+                            Button::new("ssh-next")
+                                .label("Next")
+                                .disabled(self.page_index + 1 >= pages)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.page_index += 1;
+                                    cx.notify();
+                                })),
+                        ),
+                );
+            }
+            body = body
+                .child(
+                    Button::new("confirm-ssh-import")
+                        .primary()
+                        .label("Add selected jumpers")
+                        .disabled(
+                            self.saving || !self.ssh_selected.iter().any(|selected| *selected),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.confirm_ssh_import(cx))),
+                )
+                .child(
+                    Button::new("cancel-ssh-import")
+                        .label("Cancel import")
+                        .disabled(self.saving)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.ssh_preview = None;
+                            this.ssh_selected.clear();
+                            this.file_message = None;
+                            cx.notify();
+                        })),
+                );
+        }
+        body.into_any_element()
     }
 
     fn render_editor(&self, config: &DomainConfig, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
@@ -441,27 +977,36 @@ impl Workspace {
                             | (AuthConfig::Password { .. }, 2)
                             | (AuthConfig::KeyboardInteractive, 3)
                     );
-                    let available = kind != 2 || matches!(editor.auth, AuthConfig::Password { .. });
                     form = form.child(
                         Button::new(format!("auth-{kind}"))
                             .label(label)
                             .selected(selected)
-                            .disabled(!available)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(Editor::Host(editor)) = &mut this.editor {
                                     editor.auth = match kind {
                                         0 => AuthConfig::Agent { socket: None },
-                                        1 => AuthConfig::PrivateKey {
-                                            key_path: PathBuf::new(),
-                                            passphrase_ref: None,
+                                        1 => match &editor.original_auth {
+                                            AuthConfig::PrivateKey {
+                                                key_path,
+                                                passphrase_ref,
+                                            } => AuthConfig::PrivateKey {
+                                                key_path: key_path.clone(),
+                                                passphrase_ref: passphrase_ref.clone(),
+                                            },
+                                            _ => AuthConfig::PrivateKey {
+                                                key_path: PathBuf::new(),
+                                                passphrase_ref: None,
+                                            },
                                         },
-                                        2 => match &editor.auth {
+                                        2 => match &editor.original_auth {
                                             AuthConfig::Password { credential_ref } => {
                                                 AuthConfig::Password {
                                                     credential_ref: credential_ref.clone(),
                                                 }
                                             }
-                                            _ => return,
+                                            _ => AuthConfig::Password {
+                                                credential_ref: SecretRef("pending".into()),
+                                            },
                                         },
                                         _ => AuthConfig::KeyboardInteractive,
                                     };
@@ -471,7 +1016,21 @@ impl Workspace {
                     );
                 }
                 if matches!(editor.auth, AuthConfig::PrivateKey { .. }) {
-                    form = form.child(input_row("Identity file", &editor.identity_file));
+                    form = form
+                        .child(input_row("Identity file", &editor.identity_file))
+                        .child(password_row(
+                            "Key passphrase (leave blank to keep saved value)",
+                            &editor.passphrase,
+                        ));
+                }
+                if matches!(editor.auth, AuthConfig::Password { .. }) {
+                    form = form.child(password_row(
+                        "Password (leave blank to keep saved value)",
+                        &editor.password,
+                    ));
+                }
+                if matches!(editor.auth, AuthConfig::Agent { .. }) {
+                    form = form.child(input_row("Agent socket (optional)", &editor.agent_socket));
                 }
                 form = form.child(div().font_semibold().child("Security"));
                 for (label, policy) in [
@@ -490,7 +1049,24 @@ impl Workspace {
                             })),
                     );
                 }
+                if editor.policy == HostKeyPolicy::Bypass {
+                    form = form.child(
+                        div()
+                            .text_color(cx.theme().danger)
+                            .child("SSH host identity will not be verified for this jumper."),
+                    );
+                }
                 form = form
+                    .child(div().font_semibold().child("Reliability"))
+                    .child(input_row(
+                        "Connect timeout (ms)",
+                        &editor.connect_timeout_ms,
+                    ))
+                    .child(input_row(
+                        "Keepalive interval (ms)",
+                        &editor.keepalive_interval_ms,
+                    ))
+                    .child(input_row("Keepalive max failures", &editor.keepalive_max))
                     .child(div().font_semibold().child("Notes"))
                     .child(input_row("Notes", &editor.notes));
             }
@@ -862,6 +1438,18 @@ fn input_row(
         .gap_1()
         .child(label)
         .child(Input::new(input))
+}
+
+fn password_row(
+    label: &'static str,
+    input: &gpui_kit::Entity<gpui_kit::component::input::InputState>,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .child(label)
+        .child(Input::new(input).content_type(InputContentType::Password))
 }
 
 fn state_label(state: &SupervisorState) -> &'static str {

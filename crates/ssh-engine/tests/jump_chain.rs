@@ -5,12 +5,12 @@ use russh::{
     keys::{Algorithm, PrivateKey},
     server,
 };
-use ssh_engine::{HopSpec, SshChain, SshCredential};
+use ssh_engine::{HopSpec, HostKeyApproval, HostKeyDecision, SshChain, SshCredential};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
-    sync::mpsc,
+    sync::{Mutex, mpsc},
     task::JoinHandle,
     time::timeout,
 };
@@ -148,6 +148,54 @@ fn host(id: &str, address: SocketAddr) -> SshHost {
         keepalive_max: 3,
         notes: String::new(),
     }
+}
+
+#[tokio::test]
+async fn unknown_key_requires_explicit_approval_and_saves_app_known_hosts() {
+    let (address, public_key, server) = start_server(TargetServer).await;
+    let directory = TempDir::new().expect("temporary directory");
+    let known_hosts = directory.path().join("known_hosts");
+    let (prompts, mut requests) = mpsc::channel(1);
+    let approval = HostKeyApproval {
+        prompts,
+        save_path: known_hosts.clone(),
+        save_lock: Arc::new(Mutex::new(())),
+    };
+    let cancellation = CancellationToken::new();
+    let task = tokio::spawn(async move {
+        SshChain::connect_with_approval(
+            vec![HopSpec {
+                host: host("target", address),
+                credential: SshCredential::Password(Zeroizing::new("target-secret".into())),
+                known_hosts_paths: vec![known_hosts],
+            }],
+            None,
+            &cancellation,
+            Some(approval),
+        )
+        .await
+    });
+    let prompt = timeout(Duration::from_secs(5), requests.recv())
+        .await
+        .expect("host key prompt timeout")
+        .expect("host key prompt");
+    assert_eq!(prompt.port, address.port());
+    assert!(prompt.fingerprint.starts_with("SHA256:"));
+    assert!(prompt.algorithm.contains("ed25519"));
+    prompt
+        .reply
+        .send(HostKeyDecision::TrustAndSave)
+        .expect("send approval");
+    let chain = timeout(Duration::from_secs(5), task)
+        .await
+        .expect("connect timeout")
+        .expect("connect task")
+        .expect("approved connection");
+    let stored =
+        std::fs::read_to_string(directory.path().join("known_hosts")).expect("saved known_hosts");
+    assert!(stored.contains(&public_key.to_openssh().expect("public key")));
+    chain.disconnect().await;
+    server.await.expect("server stopped");
 }
 
 #[tokio::test]

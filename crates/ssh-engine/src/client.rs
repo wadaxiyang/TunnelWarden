@@ -36,7 +36,7 @@ use zeroize::Zeroizing;
 use crate::{
     DirectTcpStream,
     cancellable_stream::CancellableStream,
-    host_key::{HostKeyError, HostKeyVerifier},
+    host_key::{HostKeyApproval, HostKeyError, HostKeyVerifier},
 };
 
 const MAX_KNOWN_HOSTS_PATHS: usize = 2;
@@ -48,6 +48,12 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(3);
 struct ConnectBudget {
     cancellation: CancellationToken,
     deadline: tokio::time::Instant,
+}
+
+struct SessionSetup {
+    remote: Option<RemoteEndpoint>,
+    private_key: Option<Arc<russh::keys::PrivateKey>>,
+    approval: Option<HostKeyApproval>,
 }
 
 pub enum SshCredential {
@@ -164,7 +170,11 @@ impl SshConnectError {
                 FailureStage::ConnectTcp,
                 Retryability::Transient,
             ),
-            Self::Handshake(HostKeyError::Unknown { .. }) => (
+            Self::Handshake(
+                HostKeyError::Unknown { .. }
+                | HostKeyError::Declined { .. }
+                | HostKeyError::ApprovalUnavailable { .. },
+            ) => (
                 TunnelErrorKind::HostKeyUnknown,
                 FailureStage::HostKeyVerification,
                 Retryability::Blocked,
@@ -269,6 +279,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             None,
+            None,
         )
         .await
     }
@@ -287,6 +298,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             None,
+            None,
         )
         .await
     }
@@ -301,6 +313,7 @@ impl DirectSshSession {
             SshCredential::Agent,
             known_hosts_paths,
             parent_cancellation,
+            None,
             None,
         )
         .await
@@ -321,6 +334,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             Some(remote),
+            None,
         )
         .await
     }
@@ -338,6 +352,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             Some(remote),
+            None,
         )
         .await
     }
@@ -354,6 +369,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             Some(remote),
+            None,
         )
         .await
     }
@@ -364,6 +380,7 @@ impl DirectSshSession {
         known_hosts_paths: &[PathBuf],
         parent_cancellation: &CancellationToken,
         remote: Option<RemoteEndpoint>,
+        approval: Option<HostKeyApproval>,
     ) -> Result<Self, SshConnectError> {
         validate(host, &credentials, known_hosts_paths)?;
         let private_key = match (&host.auth, &credentials) {
@@ -396,8 +413,11 @@ impl DirectSshSession {
                 cancellation,
                 deadline,
             },
-            remote,
-            private_key,
+            SessionSetup {
+                remote,
+                private_key,
+                approval,
+            },
             stream,
         )
         .await
@@ -410,6 +430,7 @@ impl DirectSshSession {
         parent_cancellation: &CancellationToken,
         remote: Option<RemoteEndpoint>,
         channel: DirectTcpStream,
+        approval: Option<HostKeyApproval>,
     ) -> Result<Self, SshConnectError> {
         validate(host, &credentials, known_hosts_paths)?;
         let private_key = match (&host.auth, &credentials) {
@@ -431,8 +452,11 @@ impl DirectSshSession {
                 cancellation,
                 deadline,
             },
-            remote,
-            private_key,
+            SessionSetup {
+                remote,
+                private_key,
+                approval,
+            },
             channel,
         )
         .await
@@ -443,8 +467,7 @@ impl DirectSshSession {
         credentials: SshCredential,
         known_hosts_paths: &[PathBuf],
         budget: ConnectBudget,
-        remote: Option<RemoteEndpoint>,
-        private_key: Option<Arc<russh::keys::PrivateKey>>,
+        setup: SessionSetup,
         stream: S,
     ) -> Result<Self, SshConnectError>
     where
@@ -454,6 +477,11 @@ impl DirectSshSession {
             cancellation,
             deadline,
         } = budget;
+        let SessionSetup {
+            remote,
+            private_key,
+            approval,
+        } = setup;
         let config = Arc::new(client::Config {
             nodelay: true,
             keepalive_interval: if host.keepalive_interval.is_zero() {
@@ -480,13 +508,14 @@ impl DirectSshSession {
             port: host.port,
             paths: known_hosts_paths.to_vec(),
             policy: host.host_key_policy,
+            approval: approval.clone(),
             forwarded: forwarded_sender,
         };
         let transport = CancellableStream::new(stream, cancellation.clone());
         let handshake = tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(SshConnectError::Cancelled),
-            result = timeout_at(deadline, client::connect_stream(config, transport, verifier)) => {
+            result = timeout_at(if approval.is_some() { deadline.max(tokio::time::Instant::now() + Duration::from_secs(120)) } else { deadline }, client::connect_stream(config, transport, verifier)) => {
                 match result {
                     Ok(Ok(handle)) => Ok(handle),
                     Ok(Err(source)) => Err(SshConnectError::Handshake(source)),
@@ -505,7 +534,7 @@ impl DirectSshSession {
         let authentication = tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(SshConnectError::Cancelled),
-            result = timeout_at(deadline, authenticate(&mut handle, host, credentials, private_key)) => {
+            result = timeout_at(tokio::time::Instant::now() + host.connect_timeout, authenticate(&mut handle, host, credentials, private_key)) => {
                 result.unwrap_or(Err(SshConnectError::Timeout("authentication")))
             },
         };

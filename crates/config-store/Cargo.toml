@@ -12,6 +12,7 @@ toml.workspace = true
 tunnel-domain = { path = "../tunnel-domain" }
 keyring = "=4.2.0"
 zeroize.workspace = true
+glob = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
