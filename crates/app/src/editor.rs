@@ -248,8 +248,8 @@ impl TunnelEditor {
             ),
             local_port: text(
                 &existing
-                    .map_or(1080, |tunnel| tunnel.local.port)
-                    .to_string(),
+                    .map(|tunnel| tunnel.local.port.to_string())
+                    .unwrap_or_default(),
                 window,
                 cx,
             ),
@@ -290,7 +290,7 @@ impl TunnelEditor {
             .read(cx)
             .value()
             .parse::<u16>()
-            .map_err(|_| "Local port must be between 0 and 65535")?;
+            .map_err(|_| "Enter a listen port between 1 and 65535")?;
         let remote = if self.mode == TunnelMode::Dynamic {
             None
         } else {

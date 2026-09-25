@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -200,6 +200,7 @@ pub struct TunnelManager {
     logs: LogSnapshot,
     log_views: watch::Sender<Arc<LogSnapshot>>,
     active: HashMap<TunnelId, ActiveTunnel>,
+    desired_running: HashSet<TunnelId>,
     shutdown: CancellationToken,
     auto_start: Vec<TunnelId>,
     host_key_sender: mpsc::Sender<HostKeyPrompt>,
@@ -265,6 +266,7 @@ impl TunnelManager {
                 logs: LogSnapshot::new(),
                 log_views,
                 active: HashMap::new(),
+                desired_running: HashSet::new(),
                 shutdown: shutdown.clone(),
                 auto_start,
                 host_key_sender,
@@ -357,10 +359,19 @@ impl TunnelManager {
                     }
                     Some(CoreCommand::SaveConfig { directory, config, secret, reply }) => {
                         let old_run_at_login = self.config_views.borrow().app.run_at_startup;
-                        let result = Self::persist_config(directory, config.clone(), secret, old_run_at_login).await;
-                        if result.is_ok() {
-                            self.replace_config(config).await;
-                        }
+                        let canonical = ConfigDocument::try_from(config)
+                            .and_then(ConfigDocument::into_domain)
+                            .map_err(|error| error.to_string());
+                        let result = match canonical {
+                            Ok(config) => {
+                                let result = Self::persist_config(directory, config.clone(), secret, old_run_at_login).await;
+                                if result.is_ok() {
+                                    self.replace_config(config).await;
+                                }
+                                result
+                            }
+                            Err(error) => Err(error),
+                        };
                         let _ = reply.send(result);
                     }
                     Some(CoreCommand::ImportConfig { path, reply }) => {
@@ -489,7 +500,7 @@ impl TunnelManager {
 
     async fn replace_config(&mut self, config: DomainConfig) {
         self.config_views.send_replace(Arc::new(config.clone()));
-        let old_running: HashSet<TunnelId> = self.active.keys().cloned().collect();
+        let old_running = self.desired_running.clone();
         let updated: HashMap<TunnelId, TunnelConfig> = config
             .tunnels
             .into_iter()
@@ -520,6 +531,8 @@ impl TunnelManager {
         self.hosts = config.hosts;
         self.groups = config.groups;
         self.tunnels = updated;
+        self.desired_running
+            .retain(|id| self.tunnels.contains_key(id));
         self.current.retain(|id, _| self.tunnels.contains_key(id));
         for id in self.tunnels.keys() {
             self.current.entry(id.clone()).or_insert(TunnelView {
@@ -531,7 +544,7 @@ impl TunnelManager {
         let to_start: Vec<TunnelId> = self
             .tunnels
             .values()
-            .filter(|tunnel| tunnel.auto_start || old_running.contains(&tunnel.id))
+            .filter(|tunnel| old_running.contains(&tunnel.id))
             .map(|tunnel| tunnel.id.clone())
             .collect();
         for id in to_start {
@@ -540,6 +553,10 @@ impl TunnelManager {
     }
 
     async fn start(&mut self, id: &TunnelId) {
+        if !self.tunnels.contains_key(id) {
+            return;
+        }
+        self.desired_running.insert(id.clone());
         if self.active.contains_key(id) {
             return;
         }
@@ -583,20 +600,19 @@ impl TunnelManager {
         });
         let (task, state, local_addr, retry_hint) = match tunnel.mode {
             TunnelMode::Local | TunnelMode::Dynamic => {
-                let address: SocketAddr =
-                    match format!("{}:{}", tunnel.local.host, tunnel.local.port).parse() {
-                        Ok(address) => address,
-                        Err(error) => {
-                            self.set_state(
-                                id,
-                                SupervisorState::Blocked {
-                                    reason: format!("Invalid listener address: {error}"),
-                                },
-                                None,
-                            );
-                            return;
-                        }
-                    };
+                let address = match tunnel.local.host.parse::<IpAddr>() {
+                    Ok(ip) => SocketAddr::new(ip, tunnel.local.port),
+                    Err(error) => {
+                        self.set_state(
+                            id,
+                            SupervisorState::Blocked {
+                                reason: format!("Invalid listener address: {error}"),
+                            },
+                            None,
+                        );
+                        return;
+                    }
+                };
                 let mut listener = ListenerRuntime::new();
                 if let Err(error) = listener.start_listener(address).await {
                     self.set_state(
@@ -729,6 +745,7 @@ impl TunnelManager {
     }
 
     async fn stop(&mut self, id: &TunnelId) {
+        self.desired_running.remove(id);
         if let Some(mut active) = self.active.remove(id) {
             active.cancellation.cancel();
             if timeout(STOP_DEADLINE, &mut active.task).await.is_err() {
@@ -941,13 +958,110 @@ mod config_tests {
     use super::*;
     use config_store::AppSettings;
     use tempfile::TempDir;
-    use tunnel_domain::{LocalEndpoint, RetryPolicy};
+    use tunnel_domain::{HostId, HostKeyPolicy, LocalEndpoint, RetryPolicy};
 
     struct EmptyCredentials;
     impl CredentialSource for EmptyCredentials {
         fn load(&self, _: &SecretRef) -> Result<Zeroizing<String>, String> {
             Err("no credentials configured".into())
         }
+    }
+
+    fn test_host() -> SshHost {
+        SshHost {
+            id: HostId("host".into()),
+            name: "host".into(),
+            hostname: "127.0.0.1".into(),
+            port: 9,
+            username: "user".into(),
+            auth: AuthConfig::Agent { socket: None },
+            host_key_policy: HostKeyPolicy::Strict,
+            connect_timeout: Duration::from_secs(1),
+            keepalive_interval: Duration::from_secs(10),
+            keepalive_max: 3,
+            notes: String::new(),
+        }
+    }
+
+    fn test_tunnel(bind_host: &str, port: u16) -> TunnelConfig {
+        TunnelConfig {
+            id: TunnelId("test".into()),
+            name: "test".into(),
+            group_id: None,
+            mode: TunnelMode::Dynamic,
+            jump_chain: vec![HostId("host".into())],
+            local: LocalEndpoint {
+                host: bind_host.into(),
+                port,
+            },
+            remote: None,
+            auto_start: true,
+            reconnect: RetryPolicy::default(),
+            description: String::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn manual_stop_survives_unrelated_config_save() {
+        let reserve = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let port = reserve.local_addr().expect("reserved address").port();
+        drop(reserve);
+        let tunnel = test_tunnel("127.0.0.1", port);
+        let (mut manager, _) = TunnelManager::new(
+            vec![test_host()],
+            Vec::new(),
+            vec![tunnel.clone()],
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        manager.start(&tunnel.id).await;
+        assert!(manager.active.contains_key(&tunnel.id));
+        manager.stop(&tunnel.id).await;
+        let mut edited = tunnel.clone();
+        edited.description = "unrelated note".into();
+        manager
+            .replace_config(DomainConfig {
+                app: AppSettings::default(),
+                hosts: vec![test_host()],
+                groups: Vec::new(),
+                tunnels: vec![edited],
+            })
+            .await;
+        assert!(!manager.desired_running.contains(&tunnel.id));
+        assert!(!manager.active.contains_key(&tunnel.id));
+        std::net::TcpListener::bind(("127.0.0.1", port)).expect("listener released");
+    }
+
+    #[tokio::test]
+    async fn ipv6_loopback_listener_uses_structured_address() {
+        let reserve = match std::net::TcpListener::bind("[::1]:0") {
+            Ok(listener) => listener,
+            Err(error) => {
+                eprintln!("IPv6 loopback unavailable; skipping: {error}");
+                return;
+            }
+        };
+        let port = reserve.local_addr().expect("reserved address").port();
+        drop(reserve);
+        let tunnel = test_tunnel("::1", port);
+        let (mut manager, _) = TunnelManager::new(
+            vec![test_host()],
+            Vec::new(),
+            vec![tunnel.clone()],
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        manager.start(&tunnel.id).await;
+        assert_eq!(
+            manager.current[&tunnel.id].local_addr,
+            Some(SocketAddr::new(
+                IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                port
+            ))
+        );
+        manager.stop(&tunnel.id).await;
+        std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
+            .expect("IPv6 listener released");
     }
 
     #[test]
@@ -1044,6 +1158,56 @@ mod config_tests {
                 .app
                 .minimize_to_tray
         );
+        handle.shutdown();
+        task.await.expect("manager shutdown");
+    }
+
+    #[tokio::test]
+    async fn save_uses_the_same_canonical_key_path_as_reload() {
+        let directory = TempDir::new().expect("temporary directory");
+        let (manager, handle) = TunnelManager::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        let task = tokio::spawn(manager.run());
+        let mut host = test_host();
+        host.auth = AuthConfig::PrivateKey {
+            key_path: PathBuf::from("~/.ssh/id_tunnelwarden_test"),
+            passphrase_ref: None,
+        };
+        let (reply, answer) = oneshot::channel();
+        handle
+            .try_send(CoreCommand::SaveConfig {
+                directory: directory.path().to_path_buf(),
+                config: DomainConfig {
+                    app: AppSettings::default(),
+                    hosts: vec![host],
+                    groups: Vec::new(),
+                    tunnels: Vec::new(),
+                },
+                secret: None,
+                reply,
+            })
+            .expect("queue save");
+        answer.await.expect("save reply").expect("save succeeds");
+        let in_memory = handle.subscribe_config();
+        let reloaded = ConfigStore::new(directory.path().to_path_buf())
+            .load()
+            .expect("reload config");
+        fn key_path(host: &SshHost) -> &std::path::Path {
+            match &host.auth {
+                AuthConfig::PrivateKey { key_path, .. } => key_path,
+                _ => panic!("expected private key"),
+            }
+        }
+        assert_eq!(
+            key_path(&in_memory.borrow().hosts[0]),
+            key_path(&reloaded.hosts[0])
+        );
+        assert!(!key_path(&reloaded.hosts[0]).starts_with("~"));
         handle.shutdown();
         task.await.expect("manager shutdown");
     }
