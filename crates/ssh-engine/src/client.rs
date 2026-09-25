@@ -24,7 +24,7 @@ use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite},
     net::TcpStream,
-    sync::mpsc,
+    sync::{mpsc, oneshot},
     time::{sleep_until, timeout, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
@@ -37,6 +37,10 @@ use crate::{
     DirectTcpStream,
     cancellable_stream::CancellableStream,
     host_key::{ApprovalPhase, HostKeyApproval, HostKeyError, HostKeyVerifier},
+    keyboard_interactive::{
+        InteractiveChallenge, InteractiveQuestion, KeyboardInteractiveApproval, MAX_ANSWER_BYTES,
+        MAX_PROMPTS_PER_ROUND, MAX_ROUNDS, display_text,
+    },
 };
 
 const MAX_KNOWN_HOSTS_PATHS: usize = 2;
@@ -54,12 +58,20 @@ struct SessionSetup {
     remote: Option<RemoteEndpoint>,
     private_key: Option<Arc<russh::keys::PrivateKey>>,
     approval: Option<HostKeyApproval>,
+    interactive: Option<KeyboardInteractiveApproval>,
+}
+
+#[derive(Default)]
+pub(crate) struct AuthPrompts {
+    pub host_key: Option<HostKeyApproval>,
+    pub interactive: Option<KeyboardInteractiveApproval>,
 }
 
 pub enum SshCredential {
     Password(Zeroizing<String>),
     PrivateKey(Option<Zeroizing<String>>),
     Agent,
+    KeyboardInteractive,
 }
 
 #[derive(Debug, Error)]
@@ -78,6 +90,12 @@ pub enum SshConnectError {
     Authentication(#[source] russh::Error),
     #[error("SSH credentials were rejected")]
     AuthenticationRejected,
+    #[error("keyboard-interactive authentication cancelled")]
+    InteractiveCancelled,
+    #[error("keyboard-interactive authentication requires an open window")]
+    InteractiveUnavailable,
+    #[error("keyboard-interactive server challenge is unsupported: {0}")]
+    InteractiveLimit(&'static str),
     #[error("private key file is too large")]
     PrivateKeyTooLarge,
     #[error("cannot read private key: {0}")]
@@ -145,7 +163,7 @@ impl SshConnectError {
                 FailureStage::ConnectTcp,
                 Retryability::Transient,
             ),
-            Self::Timeout("authentication") => (
+            Self::Timeout("authentication") | Self::Timeout("authentication interaction") => (
                 TunnelErrorKind::Timeout,
                 FailureStage::Authentication,
                 Retryability::Transient,
@@ -200,6 +218,13 @@ impl SshConnectError {
                 Retryability::Transient,
             ),
             Self::AuthenticationRejected => (
+                TunnelErrorKind::Authentication,
+                FailureStage::Authentication,
+                Retryability::Blocked,
+            ),
+            Self::InteractiveCancelled
+            | Self::InteractiveUnavailable
+            | Self::InteractiveLimit(_) => (
                 TunnelErrorKind::Authentication,
                 FailureStage::Authentication,
                 Retryability::Blocked,
@@ -279,7 +304,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             None,
-            None,
+            AuthPrompts::default(),
         )
         .await
     }
@@ -298,7 +323,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             None,
-            None,
+            AuthPrompts::default(),
         )
         .await
     }
@@ -314,7 +339,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             None,
-            None,
+            AuthPrompts::default(),
         )
         .await
     }
@@ -334,7 +359,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             Some(remote),
-            None,
+            AuthPrompts::default(),
         )
         .await
     }
@@ -352,7 +377,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             Some(remote),
-            None,
+            AuthPrompts::default(),
         )
         .await
     }
@@ -369,7 +394,7 @@ impl DirectSshSession {
             known_hosts_paths,
             parent_cancellation,
             Some(remote),
-            None,
+            AuthPrompts::default(),
         )
         .await
     }
@@ -380,7 +405,7 @@ impl DirectSshSession {
         known_hosts_paths: &[PathBuf],
         parent_cancellation: &CancellationToken,
         remote: Option<RemoteEndpoint>,
-        approval: Option<HostKeyApproval>,
+        prompts: AuthPrompts,
     ) -> Result<Self, SshConnectError> {
         validate(host, &credentials, known_hosts_paths)?;
         let private_key = match (&host.auth, &credentials) {
@@ -417,7 +442,8 @@ impl DirectSshSession {
             SessionSetup {
                 remote,
                 private_key,
-                approval,
+                approval: prompts.host_key,
+                interactive: prompts.interactive,
             },
             stream,
         )
@@ -431,7 +457,7 @@ impl DirectSshSession {
         parent_cancellation: &CancellationToken,
         remote: Option<RemoteEndpoint>,
         channel: DirectTcpStream,
-        approval: Option<HostKeyApproval>,
+        prompts: AuthPrompts,
     ) -> Result<Self, SshConnectError> {
         validate(host, &credentials, known_hosts_paths)?;
         let private_key = match (&host.auth, &credentials) {
@@ -456,7 +482,8 @@ impl DirectSshSession {
             SessionSetup {
                 remote,
                 private_key,
-                approval,
+                approval: prompts.host_key,
+                interactive: prompts.interactive,
             },
             channel,
         )
@@ -482,6 +509,7 @@ impl DirectSshSession {
             remote,
             private_key,
             approval,
+            interactive,
         } = setup;
         let config = Arc::new(client::Config {
             nodelay: true,
@@ -557,8 +585,8 @@ impl DirectSshSession {
         let authentication = tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(SshConnectError::Cancelled),
-            result = timeout_at(tokio::time::Instant::now() + host.connect_timeout, authenticate(&mut handle, host, credentials, private_key)) => {
-                result.unwrap_or(Err(SshConnectError::Timeout("authentication")))
+            result = timeout_at(tokio::time::Instant::now() + if matches!(credentials, SshCredential::KeyboardInteractive) { Duration::from_secs(120) } else { host.connect_timeout }, authenticate(&mut handle, host, credentials, private_key, interactive)) => {
+                result.unwrap_or(Err(SshConnectError::Timeout("authentication interaction")))
             },
         };
         if let Err(error) = authentication {
@@ -733,6 +761,7 @@ async fn authenticate(
     host: &SshHost,
     credentials: SshCredential,
     private_key: Option<Arc<russh::keys::PrivateKey>>,
+    interactive: Option<KeyboardInteractiveApproval>,
 ) -> Result<(), SshConnectError> {
     if matches!(credentials, SshCredential::Agent) {
         return authenticate_agent(handle, host).await;
@@ -761,11 +790,101 @@ async fn authenticate(
                 .map_err(SshConnectError::Authentication)?
         }
         SshCredential::Agent => return Err(SshConnectError::InvalidConfig("invalid agent state")),
+        SshCredential::KeyboardInteractive => {
+            return authenticate_interactive(handle, host, interactive).await;
+        }
     };
     if result.success() {
         Ok(())
     } else {
         Err(SshConnectError::AuthenticationRejected)
+    }
+}
+
+async fn authenticate_interactive(
+    handle: &mut client::Handle<HostKeyVerifier>,
+    host: &SshHost,
+    interactive: Option<KeyboardInteractiveApproval>,
+) -> Result<(), SshConnectError> {
+    use russh::client::KeyboardInteractiveAuthResponse as Response;
+    let interactive = interactive.ok_or(SshConnectError::InteractiveUnavailable)?;
+    let mut response = handle
+        .authenticate_keyboard_interactive_start(host.username.as_str(), None::<String>)
+        .await
+        .map_err(SshConnectError::Authentication)?;
+    for round in 1..=MAX_ROUNDS {
+        let (name, instructions, prompts) = match response {
+            Response::Success => return Ok(()),
+            Response::Failure { .. } => return Err(SshConnectError::AuthenticationRejected),
+            Response::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            } => (name, instructions, prompts),
+        };
+        if prompts.len() > MAX_PROMPTS_PER_ROUND {
+            return Err(SshConnectError::InteractiveLimit(
+                "more than 8 prompts in one round",
+            ));
+        }
+        let display_bytes = prompts.iter().try_fold(
+            name.len().saturating_add(instructions.len()),
+            |used, item| used.checked_add(item.prompt.len()),
+        );
+        if display_bytes.is_none_or(|used| used > crate::keyboard_interactive::MAX_DISPLAY_BYTES) {
+            return Err(SshConnectError::InteractiveLimit(
+                "challenge display exceeds 4 KiB",
+            ));
+        }
+        let name = display_text(&name).map_err(SshConnectError::InteractiveLimit)?;
+        let instructions =
+            display_text(&instructions).map_err(SshConnectError::InteractiveLimit)?;
+        let questions = prompts
+            .into_iter()
+            .map(|item| {
+                display_text(&item.prompt).map(|text| InteractiveQuestion {
+                    text,
+                    echo: item.echo,
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(SshConnectError::InteractiveLimit)?;
+        let expected = questions.len();
+        let (reply, answer) = oneshot::channel();
+        interactive
+            .prompts
+            .try_send(interactive.prompt(
+                &host.hostname,
+                host.port,
+                round,
+                InteractiveChallenge {
+                    name,
+                    instructions,
+                    questions,
+                },
+                reply,
+            ))
+            .map_err(|_| SshConnectError::InteractiveUnavailable)?;
+        let mut answers = answer
+            .await
+            .map_err(|_| SshConnectError::InteractiveCancelled)?
+            .ok_or(SshConnectError::InteractiveCancelled)?;
+        if answers.len() != expected || answers.iter().any(|value| value.len() > MAX_ANSWER_BYTES) {
+            return Err(SshConnectError::InteractiveLimit(
+                "answer count or size is invalid",
+            ));
+        }
+        response = handle
+            .authenticate_keyboard_interactive_respond(std::mem::take(&mut *answers))
+            .await
+            .map_err(SshConnectError::Authentication)?;
+    }
+    match response {
+        Response::Success => Ok(()),
+        Response::Failure { .. } => Err(SshConnectError::AuthenticationRejected),
+        Response::InfoRequest { .. } => Err(SshConnectError::InteractiveLimit(
+            "more than 8 challenge rounds",
+        )),
     }
 }
 
@@ -891,6 +1010,7 @@ fn validate(
         (AuthConfig::Password { .. }, SshCredential::Password(_)) => {}
         (AuthConfig::PrivateKey { .. }, SshCredential::PrivateKey(_)) => {}
         (AuthConfig::Agent { .. }, SshCredential::Agent) => {}
+        (AuthConfig::KeyboardInteractive, SshCredential::KeyboardInteractive) => {}
         _ => return Err(SshConnectError::InvalidConfig("SSH auth method mismatch")),
     }
     if host.hostname.trim().is_empty() {

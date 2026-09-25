@@ -8,7 +8,10 @@ use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 use tunnel_domain::{RemoteEndpoint, SshHost};
 
-use crate::{DirectSshSession, HostKeyApproval, SshConnectError, SshCredential};
+use crate::{
+    DirectSshSession, HostKeyApproval, KeyboardInteractiveApproval, SshConnectError, SshCredential,
+    client::AuthPrompts,
+};
 
 const MAX_HOPS: usize = 16;
 
@@ -62,6 +65,16 @@ impl SshChain {
         cancellation: &CancellationToken,
         approval: Option<HostKeyApproval>,
     ) -> Result<Self, SshChainError> {
+        Self::connect_with_prompts(hops, remote, cancellation, approval, None).await
+    }
+
+    pub async fn connect_with_prompts(
+        hops: Vec<HopSpec>,
+        remote: Option<RemoteEndpoint>,
+        cancellation: &CancellationToken,
+        approval: Option<HostKeyApproval>,
+        interactive: Option<KeyboardInteractiveApproval>,
+    ) -> Result<Self, SshChainError> {
         if hops.is_empty() {
             return Err(SshChainError::Empty);
         }
@@ -69,6 +82,7 @@ impl SshChain {
             return Err(SshChainError::TooManyHops);
         }
         let total_hops = hops.len();
+        let interactive = interactive.map(|provider| provider.next_attempt());
         let mut sessions = Vec::with_capacity(total_hops);
         let mut remaining = hops.into_iter().peekable();
         let first = remaining.next().ok_or(SshChainError::Empty)?;
@@ -83,7 +97,10 @@ impl SshChain {
             &first.known_hosts_paths,
             cancellation,
             first_remote,
-            approval.clone(),
+            AuthPrompts {
+                host_key: approval.clone(),
+                interactive: interactive.as_ref().map(|provider| provider.for_hop(1)),
+            },
         )
         .await
         .map_err(|source| SshChainError::Hop {
@@ -129,7 +146,12 @@ impl SshChain {
                 cancellation,
                 final_remote,
                 channel,
-                approval.clone(),
+                AuthPrompts {
+                    host_key: approval.clone(),
+                    interactive: interactive
+                        .as_ref()
+                        .map(|provider| provider.for_hop(index + 2)),
+                },
             )
             .await;
             match next {

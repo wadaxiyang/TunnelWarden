@@ -5,11 +5,15 @@ use russh::{
     keys::{Algorithm, PrivateKey},
     server,
 };
-use ssh_engine::{DirectSshSession, SshConnectError};
+use ssh_engine::{
+    DirectSshSession, HopSpec, KeyboardInteractiveApproval, SshChain, SshConnectError,
+    SshCredential,
+};
 use tempfile::TempDir;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
+    sync::mpsc,
     task::JoinHandle,
     time::timeout,
 };
@@ -26,6 +30,52 @@ use tokio::net::windows::named_pipe::ServerOptions;
 
 struct PasswordServer {
     authorized_key: Option<russh::keys::PublicKey>,
+}
+
+#[derive(Default)]
+struct InteractiveServer {
+    round: usize,
+}
+
+impl server::Handler for InteractiveServer {
+    type Error = russh::Error;
+
+    async fn auth_keyboard_interactive<'a>(
+        &'a mut self,
+        user: &str,
+        _submethods: &str,
+        response: Option<server::Response<'a>>,
+    ) -> Result<server::Auth, Self::Error> {
+        if user != "alice" {
+            return Ok(server::Auth::reject());
+        }
+        match (self.round, response) {
+            (0, None) => Ok(server::Auth::Partial {
+                name: "Login\u{1b}".into(),
+                instructions: "Enter password".into(),
+                prompts: vec![("Password: ".into(), false)].into(),
+            }),
+            (0, Some(mut response)) => {
+                if response.next().as_deref() != Some(b"secret") {
+                    return Ok(server::Auth::reject());
+                }
+                self.round = 1;
+                Ok(server::Auth::Partial {
+                    name: "Second factor".into(),
+                    instructions: "Enter code".into(),
+                    prompts: vec![("Code: ".into(), true)].into(),
+                })
+            }
+            (1, Some(mut response)) => {
+                if response.next().as_deref() == Some(b"123456") {
+                    Ok(server::Auth::Accept)
+                } else {
+                    Ok(server::Auth::reject())
+                }
+            }
+            _ => Ok(server::Auth::reject()),
+        }
+    }
 }
 
 impl server::Handler for PasswordServer {
@@ -119,6 +169,30 @@ impl TestServer {
         }
     }
 
+    async fn start_interactive() -> Self {
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).expect("host key");
+        let public_key = key.public_key().clone();
+        let mut config = server::Config::default();
+        config.keys.push(key);
+        config.auth_rejection_time = Duration::from_millis(1);
+        config.auth_rejection_time_initial = Some(Duration::from_millis(1));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let address = listener.local_addr().expect("address");
+        let task = tokio::spawn(async move {
+            if let Ok((socket, _)) = listener.accept().await
+                && let Ok(session) =
+                    server::run_stream(Arc::new(config), socket, InteractiveServer::default()).await
+            {
+                let _ = session.await;
+            }
+        });
+        Self {
+            address,
+            public_key,
+            task,
+        }
+    }
+
     fn host(&self) -> SshHost {
         SshHost {
             id: HostId("test".into()),
@@ -152,6 +226,104 @@ impl TestServer {
         self.task.abort();
         let _ = self.task.await;
     }
+}
+
+#[tokio::test]
+async fn keyboard_interactive_routes_two_rounds_and_preserves_echo() {
+    let server = TestServer::start_interactive().await;
+    let directory = TempDir::new().expect("directory");
+    let mut host = server.host();
+    host.auth = AuthConfig::KeyboardInteractive;
+    let path = server.trust(directory.path(), &server.public_key);
+    let (tx, mut rx) = mpsc::channel(2);
+    let provider = KeyboardInteractiveApproval::new(tx, "tunnel-one".into());
+    let cancellation = CancellationToken::new();
+    let task = tokio::spawn(async move {
+        SshChain::connect_with_prompts(
+            vec![HopSpec {
+                host,
+                credential: SshCredential::KeyboardInteractive,
+                known_hosts_paths: vec![path],
+            }],
+            None,
+            &cancellation,
+            None,
+            Some(provider),
+        )
+        .await
+    });
+    let first = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("first prompt")
+        .expect("prompt");
+    assert_eq!(
+        (first.tunnel_id.as_str(), first.hop, first.round),
+        ("tunnel-one", 1, 1)
+    );
+    assert_eq!(first.name, "Login�");
+    assert!(!first.questions[0].echo);
+    first
+        .reply
+        .send(Some(Zeroizing::new(vec!["secret".into()])))
+        .expect("answer");
+    let second = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("second prompt")
+        .expect("prompt");
+    assert_eq!(second.attempt, 1);
+    assert_eq!(second.round, 2);
+    assert!(second.questions[0].echo);
+    second
+        .reply
+        .send(Some(Zeroizing::new(vec!["123456".into()])))
+        .expect("answer");
+    let chain = timeout(Duration::from_secs(5), task)
+        .await
+        .expect("connection")
+        .expect("join")
+        .expect("authenticated");
+    assert!(!chain.is_closed());
+    chain.disconnect().await;
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn keyboard_interactive_cancel_invalidates_pending_answer() {
+    let server = TestServer::start_interactive().await;
+    let directory = TempDir::new().expect("directory");
+    let mut host = server.host();
+    host.auth = AuthConfig::KeyboardInteractive;
+    let path = server.trust(directory.path(), &server.public_key);
+    let (tx, mut rx) = mpsc::channel(1);
+    let provider = KeyboardInteractiveApproval::new(tx, "tunnel-cancel".into());
+    let cancellation = CancellationToken::new();
+    let attempt_cancel = cancellation.clone();
+    let task = tokio::spawn(async move {
+        SshChain::connect_with_prompts(
+            vec![HopSpec {
+                host,
+                credential: SshCredential::KeyboardInteractive,
+                known_hosts_paths: vec![path],
+            }],
+            None,
+            &attempt_cancel,
+            None,
+            Some(provider),
+        )
+        .await
+    });
+    let prompt = timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("prompt deadline")
+        .expect("prompt");
+    cancellation.cancel();
+    let result = timeout(Duration::from_secs(5), task)
+        .await
+        .expect("cancel deadline")
+        .expect("join");
+    assert!(result.is_err());
+    assert!(prompt.reply.is_closed());
+    server.stop().await;
 }
 
 #[tokio::test]

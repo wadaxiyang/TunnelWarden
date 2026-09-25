@@ -11,8 +11,9 @@ use config_store::{
     SshImportPreview, preview_ssh_config, set_run_at_login,
 };
 use ssh_engine::{
-    HopSpec, HostKeyApproval, HostKeyDecision, HostKeyPrompt, SshChain, SshChainError,
-    SshCredential,
+    HopSpec, HostKeyApproval, HostKeyDecision, HostKeyPrompt, InteractiveQuestion,
+    KeyboardInteractiveApproval, KeyboardInteractivePrompt, MAX_ANSWER_BYTES, SshChain,
+    SshChainError, SshCredential,
 };
 use thiserror::Error;
 use tokio::{
@@ -35,6 +36,7 @@ const MAX_TUNNELS: usize = 1024;
 const COMMAND_CAPACITY: usize = 128;
 const STOP_DEADLINE: Duration = Duration::from_secs(3);
 const MAX_HOST_KEY_PROMPTS: usize = 16;
+const MAX_INTERACTIVE_PROMPTS: usize = 16;
 const MAX_FILE_JOBS: usize = 4;
 const MAX_LOG_EVENTS: usize = 500;
 const MAX_LOG_TEXT_CHARS: usize = 256;
@@ -88,6 +90,21 @@ pub struct HostKeyPromptView {
     pub fingerprint: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct InteractivePromptView {
+    pub id: u64,
+    pub tunnel_id: String,
+    pub generation: u64,
+    pub attempt: u64,
+    pub hop: usize,
+    pub host: String,
+    pub port: u16,
+    pub round: usize,
+    pub name: String,
+    pub instructions: String,
+    pub questions: Vec<InteractiveQuestion>,
+}
+
 pub enum CoreCommand {
     StartAll,
     StopAll,
@@ -122,6 +139,13 @@ pub enum CoreCommand {
         id: u64,
         decision: HostKeyDecision,
     },
+    ResolveInteractive {
+        id: u64,
+        generation: u64,
+        answers: Option<Zeroizing<Vec<String>>>,
+    },
+    InteractiveWindowOpened,
+    InteractiveWindowClosed,
 }
 
 pub struct SecretUpdate {
@@ -148,6 +172,7 @@ pub struct ManagerHandle {
     commands: mpsc::Sender<CoreCommand>,
     snapshots: watch::Receiver<Arc<ManagerSnapshot>>,
     host_keys: watch::Receiver<Arc<Vec<HostKeyPromptView>>>,
+    interactive: watch::Receiver<Arc<Vec<InteractivePromptView>>>,
     config: watch::Receiver<Arc<DomainConfig>>,
     logs: watch::Receiver<Arc<LogSnapshot>>,
     shutdown: CancellationToken,
@@ -169,6 +194,9 @@ impl ManagerHandle {
 
     pub fn subscribe_host_keys(&self) -> watch::Receiver<Arc<Vec<HostKeyPromptView>>> {
         self.host_keys.clone()
+    }
+    pub fn subscribe_interactive(&self) -> watch::Receiver<Arc<Vec<InteractivePromptView>>> {
+        self.interactive.clone()
     }
     pub fn subscribe_config(&self) -> watch::Receiver<Arc<DomainConfig>> {
         self.config.clone()
@@ -193,6 +221,11 @@ struct ActiveTunnel {
 struct PendingHostKey {
     view: HostKeyPromptView,
     reply: oneshot::Sender<HostKeyDecision>,
+}
+
+struct PendingInteractive {
+    view: InteractivePromptView,
+    reply: oneshot::Sender<Option<Zeroizing<Vec<String>>>>,
 }
 
 struct PendingSave {
@@ -267,9 +300,16 @@ pub struct TunnelManager {
     host_key_sender: mpsc::Sender<HostKeyPrompt>,
     host_key_requests: mpsc::Receiver<HostKeyPrompt>,
     host_key_views: watch::Sender<Arc<Vec<HostKeyPromptView>>>,
+    interactive_sender: mpsc::Sender<KeyboardInteractivePrompt>,
+    interactive_requests: mpsc::Receiver<KeyboardInteractivePrompt>,
+    interactive_views: watch::Sender<Arc<Vec<InteractivePromptView>>>,
     config_views: watch::Sender<Arc<DomainConfig>>,
     pending_host_keys: Vec<PendingHostKey>,
+    pending_interactive: Vec<PendingInteractive>,
     next_host_key_id: u64,
+    next_interactive_id: u64,
+    next_generation: u64,
+    interactive_windows: usize,
     app_known_hosts_path: Option<PathBuf>,
     host_key_save_lock: Arc<Mutex<()>>,
 }
@@ -308,6 +348,8 @@ impl TunnelManager {
         let (log_views, log_rx) = watch::channel(Arc::new(LogSnapshot::new()));
         let (host_key_sender, host_key_requests) = mpsc::channel(MAX_HOST_KEY_PROMPTS);
         let (host_key_views, host_key_rx) = watch::channel(Arc::new(Vec::new()));
+        let (interactive_sender, interactive_requests) = mpsc::channel(MAX_INTERACTIVE_PROMPTS);
+        let (interactive_views, interactive_rx) = watch::channel(Arc::new(Vec::new()));
         let (config_views, config_rx) = watch::channel(Arc::new(DomainConfig {
             app: AppSettings::default(),
             hosts: hosts.clone(),
@@ -337,9 +379,16 @@ impl TunnelManager {
                 host_key_sender,
                 host_key_requests,
                 host_key_views,
+                interactive_sender,
+                interactive_requests,
+                interactive_views,
                 config_views,
                 pending_host_keys: Vec::new(),
+                pending_interactive: Vec::new(),
                 next_host_key_id: 1,
+                next_interactive_id: 1,
+                next_generation: 1,
+                interactive_windows: 0,
                 app_known_hosts_path: None,
                 host_key_save_lock: Arc::new(Mutex::new(())),
             },
@@ -348,6 +397,7 @@ impl TunnelManager {
                 snapshots: snapshots_rx,
                 logs: log_rx,
                 host_keys: host_key_rx,
+                interactive: interactive_rx,
                 config: config_rx,
                 shutdown,
             },
@@ -420,6 +470,9 @@ impl TunnelManager {
                 },
                 prompt = self.host_key_requests.recv() => {
                     if let Some(prompt) = prompt { self.queue_host_key(prompt); }
+                },
+                prompt = self.interactive_requests.recv() => {
+                    if let Some(prompt) = prompt { self.queue_interactive(prompt); }
                 },
                 _ = poll.tick(), if !self.active.is_empty() => self.refresh().await,
                 command = self.commands.recv() => match command {
@@ -519,6 +572,25 @@ impl TunnelManager {
                             self.publish_host_keys();
                         }
                     }
+                    Some(CoreCommand::ResolveInteractive { id, generation, answers }) => {
+                        if let Some(index) = self.pending_interactive.iter().position(|prompt| prompt.view.id == id && prompt.view.generation == generation) {
+                            let pending = self.pending_interactive.remove(index);
+                            if !pending.reply.is_closed() && answers.as_ref().is_none_or(|values| values.len() == pending.view.questions.len() && values.iter().all(|value| value.len() <= MAX_ANSWER_BYTES)) {
+                                let _ = pending.reply.send(answers);
+                            }
+                            self.publish_interactive();
+                        }
+                    }
+                    Some(CoreCommand::InteractiveWindowOpened) => {
+                        self.interactive_windows = self.interactive_windows.saturating_add(1);
+                    }
+                    Some(CoreCommand::InteractiveWindowClosed) => {
+                        self.interactive_windows = self.interactive_windows.saturating_sub(1);
+                        if self.interactive_windows == 0 {
+                            self.pending_interactive.clear();
+                            self.publish_interactive();
+                        }
+                    }
                     None => break,
                 },
             }
@@ -527,6 +599,7 @@ impl TunnelManager {
             active.cancellation.cancel();
         }
         self.pending_host_keys.clear();
+        self.pending_interactive.clear();
         let deadline = Instant::now() + STOP_DEADLINE;
         for (_, mut active) in self.active.drain() {
             if timeout_at(deadline, &mut active.task).await.is_err() {
@@ -596,6 +669,44 @@ impl TunnelManager {
             self.pending_host_keys
                 .iter()
                 .map(|prompt| prompt.view.clone())
+                .collect(),
+        ));
+    }
+
+    fn queue_interactive(&mut self, prompt: KeyboardInteractivePrompt) {
+        if self.interactive_windows == 0
+            || prompt.reply.is_closed()
+            || self.pending_interactive.len() >= MAX_INTERACTIVE_PROMPTS
+        {
+            let _ = prompt.reply.send(None);
+            return;
+        }
+        let view = InteractivePromptView {
+            id: self.next_interactive_id,
+            tunnel_id: prompt.tunnel_id,
+            generation: prompt.generation,
+            attempt: prompt.attempt,
+            hop: prompt.hop,
+            host: prompt.host,
+            port: prompt.port,
+            round: prompt.round,
+            name: prompt.name,
+            instructions: prompt.instructions,
+            questions: prompt.questions,
+        };
+        self.next_interactive_id = self.next_interactive_id.wrapping_add(1).max(1);
+        self.pending_interactive.push(PendingInteractive {
+            view,
+            reply: prompt.reply,
+        });
+        self.publish_interactive();
+    }
+
+    fn publish_interactive(&self) {
+        self.interactive_views.send_replace(Arc::new(
+            self.pending_interactive
+                .iter()
+                .map(|pending| pending.view.clone())
                 .collect(),
         ));
     }
@@ -737,6 +848,11 @@ impl TunnelManager {
             save_path: path.clone(),
             save_lock: Arc::clone(&self.host_key_save_lock),
         });
+        let generation = self.next_generation;
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let interactive =
+            KeyboardInteractiveApproval::new(self.interactive_sender.clone(), id.0.clone())
+                .with_generation(generation);
         let (task, state, local_addr, retry_hint) = match tunnel.mode {
             TunnelMode::Local | TunnelMode::Dynamic => {
                 let address = match tunnel.local.host.parse::<IpAddr>() {
@@ -806,6 +922,7 @@ impl TunnelManager {
                 let connect_cancel = cancellation.clone();
                 let known_path = app_path.clone();
                 let approval = approval.clone();
+                let interactive = interactive.clone();
                 let task = tokio::spawn(async move {
                     supervisor
                         .run(move || {
@@ -815,14 +932,16 @@ impl TunnelManager {
                             let remote = remote.clone();
                             let known_path = known_path.clone();
                             let approval = approval.clone();
+                            let interactive = interactive.clone();
                             async move {
                                 let hops =
                                     build_hops(&hosts, credentials, known_path.as_ref()).await?;
-                                SshChain::connect_with_approval(
+                                SshChain::connect_with_prompts(
                                     hops,
                                     remote,
                                     &cancellation,
                                     approval,
+                                    Some(interactive),
                                 )
                                 .await
                             }
@@ -845,6 +964,7 @@ impl TunnelManager {
                 let remote = tunnel.remote.clone();
                 let known_path = app_path.clone();
                 let approval = approval.clone();
+                let interactive = interactive.clone();
                 let task = tokio::spawn(async move {
                     supervisor
                         .run(move |session_token| {
@@ -853,14 +973,16 @@ impl TunnelManager {
                             let remote = remote.clone();
                             let known_path = known_path.clone();
                             let approval = approval.clone();
+                            let interactive = interactive.clone();
                             async move {
                                 let hops =
                                     build_hops(&hosts, credentials, known_path.as_ref()).await?;
-                                SshChain::connect_with_approval(
+                                SshChain::connect_with_prompts(
                                     hops,
                                     remote,
                                     &session_token,
                                     approval,
+                                    Some(interactive),
                                 )
                                 .await
                             }
@@ -892,6 +1014,12 @@ impl TunnelManager {
         let mut tasks = Vec::with_capacity(ids.len());
         for id in ids {
             self.desired_running.remove(&id);
+            let previous = self.pending_interactive.len();
+            self.pending_interactive
+                .retain(|pending| pending.view.tunnel_id != id.0);
+            if self.pending_interactive.len() != previous {
+                self.publish_interactive();
+            }
             if let Some(active) = self.active.remove(&id) {
                 active.cancellation.cancel();
                 tasks.push((id, active.task));
@@ -914,6 +1042,12 @@ impl TunnelManager {
             .retain(|prompt| !prompt.reply.is_closed());
         if self.pending_host_keys.len() != previous_prompts {
             self.publish_host_keys();
+        }
+        let previous_interactive = self.pending_interactive.len();
+        self.pending_interactive
+            .retain(|prompt| !prompt.reply.is_closed());
+        if self.pending_interactive.len() != previous_interactive {
+            self.publish_interactive();
         }
         let mut changed = false;
         let mut transitions = Vec::new();
@@ -1119,12 +1253,7 @@ async fn build_hops(
     for (ix, host) in hosts.iter().enumerate() {
         let credential = match &host.auth {
             AuthConfig::Agent { .. } => SshCredential::Agent,
-            AuthConfig::KeyboardInteractive => {
-                return Err(SshChainError::Credential {
-                    hop: ix + 1,
-                    reason: "Keyboard-interactive authentication is not available yet".into(),
-                });
-            }
+            AuthConfig::KeyboardInteractive => SshCredential::KeyboardInteractive,
             AuthConfig::Password { credential_ref } => {
                 let secret =
                     load_secret(Arc::clone(&credentials), credential_ref.clone(), ix + 1).await?;

@@ -19,12 +19,13 @@ use gpui_kit::{
 };
 use tokio::sync::oneshot;
 use tunnel_core::{
-    CoreCommand, HostKeyDecision, HostKeyPromptView, LogEvent, LogLevel, LogSnapshot, LogSource,
-    ManagerHandle, ManagerSnapshot, SaveReceipt, SecretUpdate, SupervisorState, TunnelAction,
-    actions_for,
+    CoreCommand, HostKeyDecision, HostKeyPromptView, InteractivePromptView, LogEvent, LogLevel,
+    LogSnapshot, LogSource, ManagerHandle, ManagerSnapshot, SaveReceipt, SecretUpdate,
+    SupervisorState, TunnelAction, actions_for,
 };
 use tunnel_domain::TunnelMode;
 use tunnel_domain::{AuthConfig, GroupId, HostId, HostKeyPolicy, SecretRef, TunnelGroup, TunnelId};
+use zeroize::Zeroizing;
 
 use crate::editor::{Editor, HostEditor, TunnelEditor};
 
@@ -106,8 +107,11 @@ pub struct Workspace {
     runtime_error: Option<String>,
     _updates: Option<Task<()>>,
     _host_key_updates: Option<Task<()>>,
+    _interactive_updates: Option<Task<()>>,
     _log_updates: Option<Task<()>>,
     host_key_prompts: Arc<Vec<HostKeyPromptView>>,
+    interactive_prompts: Arc<Vec<InteractivePromptView>>,
+    interactive_form: Option<(u64, Vec<Entity<InputState>>)>,
     logs: Arc<LogSnapshot>,
     log_filter: LogFilter,
     log_search: Entity<InputState>,
@@ -167,6 +171,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        if let Some(manager) = &manager {
+            let _ = manager.try_send(CoreCommand::InteractiveWindowOpened);
+        }
         let (snapshot, updates) = match &manager {
             Some(manager) => {
                 let mut state = manager.subscribe();
@@ -199,6 +206,33 @@ impl Workspace {
                         if this
                             .update(cx, |view, cx| {
                                 view.host_key_prompts = latest;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+                (prompts, Some(updates))
+            }
+            None => (Arc::new(Vec::new()), None),
+        };
+        let (interactive_prompts, interactive_updates) = match &manager {
+            Some(manager) => {
+                let mut state = manager.subscribe_interactive();
+                let prompts = Arc::clone(&state.borrow_and_update());
+                let updates = cx.spawn(async move |this, cx: &mut AsyncApp| {
+                    while state.changed().await.is_ok() {
+                        let latest = Arc::clone(&state.borrow_and_update());
+                        if this
+                            .update(cx, |view, cx| {
+                                if view.interactive_form.as_ref().is_some_and(|(id, _)| {
+                                    latest.first().is_none_or(|prompt| prompt.id != *id)
+                                }) {
+                                    view.interactive_form = None;
+                                }
+                                view.interactive_prompts = latest;
                                 cx.notify();
                             })
                             .is_err()
@@ -251,8 +285,11 @@ impl Workspace {
             runtime_error,
             _updates: updates,
             _host_key_updates: host_key_updates,
+            _interactive_updates: interactive_updates,
             _log_updates: log_updates,
             host_key_prompts,
+            interactive_prompts,
+            interactive_form: None,
             logs,
             log_filter: LogFilter::All,
             log_search,
@@ -897,6 +934,11 @@ impl Workspace {
         } else {
             content
         };
+        let content = if let Some(prompt) = self.interactive_prompts.first() {
+            content.child(self.render_interactive_prompt(prompt, cx))
+        } else {
+            content
+        };
         let content = if let Some(page) = self.pending_page {
             content.child(
                 div()
@@ -1053,6 +1095,136 @@ impl Workspace {
                                 )
                             })),
                     ),
+            )
+            .into_any_element()
+    }
+
+    fn render_interactive_prompt(
+        &self,
+        prompt: &InteractivePromptView,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let id = prompt.id;
+        let generation = prompt.generation;
+        let mut content = div()
+            .p_4()
+            .mx_6()
+            .mt_3()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .border_1()
+            .border_color(cx.theme().warning)
+            .child(
+                div()
+                    .font_semibold()
+                    .child("SSH keyboard interactive authentication"),
+            )
+            .child(format!(
+                "Tunnel {} · generation {} · hop {} · attempt {} · {}:{} · round {}",
+                prompt.tunnel_id,
+                generation,
+                prompt.hop,
+                prompt.attempt,
+                prompt.host,
+                prompt.port,
+                prompt.round
+            ))
+            .child(prompt.name.clone())
+            .child(prompt.instructions.clone());
+        if let Some((form_id, inputs)) = &self.interactive_form {
+            if *form_id == id {
+                for (index, question) in prompt.questions.iter().enumerate() {
+                    if let Some(input) = inputs.get(index) {
+                        let field = Input::new(input);
+                        let field = if question.echo {
+                            field
+                        } else {
+                            field.content_type(InputContentType::Password)
+                        };
+                        content = content.child(div().child(question.text.clone()).child(field));
+                    }
+                }
+                content = content.child(
+                    Button::new(format!("interactive-submit-{id}"))
+                        .primary()
+                        .label("Continue")
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            let Some((form_id, inputs)) = this.interactive_form.take() else {
+                                return;
+                            };
+                            if form_id != id
+                                || this.interactive_prompts.first().is_none_or(|prompt| {
+                                    prompt.id != id || prompt.generation != generation
+                                })
+                            {
+                                return;
+                            }
+                            let answers: Vec<String> = inputs
+                                .iter()
+                                .map(|input| input.read(cx).value().to_string())
+                                .collect();
+                            if answers.iter().any(|answer| answer.len() > 16 * 1024) {
+                                this.command_error = Some("An SSH answer exceeds 16 KiB".into());
+                                cx.notify();
+                                return;
+                            }
+                            this.request(
+                                CoreCommand::ResolveInteractive {
+                                    id,
+                                    generation,
+                                    answers: Some(Zeroizing::new(answers)),
+                                },
+                                cx,
+                            );
+                        })),
+                );
+            }
+        } else {
+            let count = prompt.questions.len();
+            content =
+                content.child(
+                    Button::new(format!("interactive-open-{id}"))
+                        .primary()
+                        .label("Enter responses")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            if this.interactive_prompts.first().is_none_or(|prompt| {
+                                prompt.id != id || prompt.generation != generation
+                            }) {
+                                return;
+                            }
+                            this.interactive_form = Some((
+                                id,
+                                (0..count)
+                                    .map(|_| cx.new(|cx| InputState::new(window, cx)))
+                                    .collect(),
+                            ));
+                            cx.notify();
+                        })),
+                );
+        }
+        content
+            .child(
+                Button::new(format!("interactive-cancel-{id}"))
+                    .label("Cancel")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this
+                            .interactive_prompts
+                            .first()
+                            .is_none_or(|prompt| prompt.id != id || prompt.generation != generation)
+                        {
+                            return;
+                        }
+                        this.interactive_form = None;
+                        this.request(
+                            CoreCommand::ResolveInteractive {
+                                id,
+                                generation,
+                                answers: None,
+                            },
+                            cx,
+                        );
+                    })),
             )
             .into_any_element()
     }
@@ -1482,7 +1654,6 @@ impl Workspace {
                         Button::new(format!("auth-{kind}"))
                             .label(label)
                             .selected(selected)
-                            .disabled(kind == 3)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(Editor::Host(editor)) = &mut this.editor {
                                     editor.auth = match kind {
@@ -1515,13 +1686,6 @@ impl Workspace {
                                     cx.notify();
                                 }
                             })),
-                    );
-                }
-                if matches!(editor.auth, AuthConfig::KeyboardInteractive) {
-                    form = form.child(
-                        div()
-                            .text_color(cx.theme().danger)
-                            .child("Keyboard Interactive is not yet supported. Choose another authentication method before starting this host."),
                     );
                 }
                 if matches!(editor.auth, AuthConfig::PrivateKey { .. }) {
@@ -2161,6 +2325,14 @@ impl Workspace {
     }
 }
 
+impl Drop for Workspace {
+    fn drop(&mut self) {
+        if let Some(manager) = &self.manager {
+            let _ = manager.try_send(CoreCommand::InteractiveWindowClosed);
+        }
+    }
+}
+
 fn input_row(
     label: &'static str,
     input: &gpui_kit::Entity<gpui_kit::component::input::InputState>,
@@ -2455,6 +2627,55 @@ mod ui_tests {
                     );
                 })
                 .expect("host key action");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn interactive_prompt_creates_and_discards_prompt_owned_inputs(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let config = ConfigDocument::default()
+            .into_domain()
+            .expect("default config");
+        let handle = cx.add_window(move |window, cx| {
+            Workspace::new(Ok((PathBuf::new(), config)), None, None, window, cx)
+        });
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, cx| {
+                    view.interactive_prompts = Arc::new(vec![InteractivePromptView {
+                        id: 21,
+                        tunnel_id: "test-tunnel".into(),
+                        generation: 2,
+                        attempt: 3,
+                        hop: 2,
+                        host: "example.test".into(),
+                        port: 22,
+                        round: 1,
+                        name: "Authentication".into(),
+                        instructions: "Answer the challenge".into(),
+                        questions: vec![tunnel_core::InteractiveQuestion {
+                            text: "Password:".into(),
+                            echo: false,
+                        }],
+                    }]);
+                    cx.notify();
+                })
+                .expect("workspace");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            assert!(window.find("interactive-open-21").visible());
+            window.click("interactive-open-21", cx);
+            assert!(window.find("interactive-submit-21").visible());
+            window.click("interactive-cancel-21", cx);
+        })
+        .expect("workspace window");
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, _| {
+                    assert!(view.interactive_form.is_none());
+                })
+                .expect("workspace");
         });
     }
 
