@@ -1482,6 +1482,7 @@ impl Workspace {
                         Button::new(format!("auth-{kind}"))
                             .label(label)
                             .selected(selected)
+                            .disabled(kind == 3)
                             .on_click(cx.listener(move |this, _, _, cx| {
                                 if let Some(Editor::Host(editor)) = &mut this.editor {
                                     editor.auth = match kind {
@@ -1514,6 +1515,13 @@ impl Workspace {
                                     cx.notify();
                                 }
                             })),
+                    );
+                }
+                if matches!(editor.auth, AuthConfig::KeyboardInteractive) {
+                    form = form.child(
+                        div()
+                            .text_color(cx.theme().danger)
+                            .child("Keyboard Interactive is not yet supported. Choose another authentication method before starting this host."),
                     );
                 }
                 if matches!(editor.auth, AuthConfig::PrivateKey { .. }) {
