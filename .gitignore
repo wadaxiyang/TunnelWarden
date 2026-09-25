@@ -1,4 +1,8 @@
 /target/
+/vendor/russh/target/
+/vendor/russh/Cargo.lock
+/vendor/russh/.cargo-ok
+/vendor/russh/.cargo_vcs_info.json
 *.log
 *.tmp
 /logs/

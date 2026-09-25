@@ -19,3 +19,4 @@ toml = "=0.9.12"
 
 [patch.crates-io]
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
+russh = { path = "vendor/russh" }
