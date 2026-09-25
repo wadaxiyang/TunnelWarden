@@ -82,6 +82,7 @@ impl SshChain {
             return Err(SshChainError::TooManyHops);
         }
         let total_hops = hops.len();
+        let approval = approval.map(|provider| provider.next_attempt());
         let interactive = interactive.map(|provider| provider.next_attempt());
         let mut sessions = Vec::with_capacity(total_hops);
         let mut remaining = hops.into_iter().peekable();
@@ -98,7 +99,9 @@ impl SshChain {
             cancellation,
             first_remote,
             AuthPrompts {
-                host_key: approval.clone(),
+                host_key: approval
+                    .as_ref()
+                    .map(|provider| provider.for_hop(1, &first.host.id.0)),
                 interactive: interactive.as_ref().map(|provider| provider.for_hop(1)),
             },
         )
@@ -147,7 +150,9 @@ impl SshChain {
                 final_remote,
                 channel,
                 AuthPrompts {
-                    host_key: approval.clone(),
+                    host_key: approval
+                        .as_ref()
+                        .map(|provider| provider.for_hop(index + 2, &hop.host.id.0)),
                     interactive: interactive
                         .as_ref()
                         .map(|provider| provider.for_hop(index + 2)),

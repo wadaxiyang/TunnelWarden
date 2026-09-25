@@ -172,7 +172,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> Self {
         if let Some(manager) = &manager {
-            let _ = manager.try_send(CoreCommand::InteractiveWindowOpened);
+            let _ = manager.try_send(CoreCommand::PromptWindowOpened);
         }
         let (snapshot, updates) = match &manager {
             Some(manager) => {
@@ -1029,6 +1029,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> gpui_kit::AnyElement {
         let id = prompt.id;
+        let generation = prompt.generation;
         div()
             .p_4()
             .mx_6()
@@ -1044,9 +1045,11 @@ impl Workspace {
                     .child("The authenticity of this SSH host cannot be established"),
             )
             .child(format!(
-                "{}:{} · {} · {}",
+                "Tunnel {} · host {} · hop {} · generation {} · attempt {} · {}:{} · {} · {}",
+                prompt.tunnel_id, prompt.host_id, prompt.hop, generation, prompt.attempt,
                 prompt.host, prompt.port, prompt.algorithm, prompt.fingerprint
             ))
+            .child("Trust Once applies only to this SSH connection. Confirmation expires after 120 seconds.")
             .child(format!(
                 "{} pending host key confirmation(s)",
                 self.host_key_prompts.len()
@@ -1062,6 +1065,7 @@ impl Workspace {
                                 this.request(
                                     CoreCommand::ResolveHostKey {
                                         id,
+                                        generation,
                                         decision: HostKeyDecision::TrustOnce,
                                     },
                                     cx,
@@ -1076,6 +1080,7 @@ impl Workspace {
                                 this.request(
                                     CoreCommand::ResolveHostKey {
                                         id,
+                                        generation,
                                         decision: HostKeyDecision::TrustAndSave,
                                     },
                                     cx,
@@ -1089,6 +1094,7 @@ impl Workspace {
                                 this.request(
                                     CoreCommand::ResolveHostKey {
                                         id,
+                                        generation,
                                         decision: HostKeyDecision::Cancel,
                                     },
                                     cx,
@@ -2328,7 +2334,7 @@ impl Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         if let Some(manager) = &self.manager {
-            let _ = manager.try_send(CoreCommand::InteractiveWindowClosed);
+            let _ = manager.try_send(CoreCommand::PromptWindowClosed);
         }
     }
 }
@@ -2601,6 +2607,13 @@ mod ui_tests {
                     view.manager = Some(manager_handle);
                     view.host_key_prompts = Arc::new(vec![HostKeyPromptView {
                         id: 7,
+                        tunnel_id: "test-tunnel".into(),
+                        host_id: "test-host".into(),
+                        generation: 1,
+                        attempt: 1,
+                        hop: 1,
+                        expires_at: tokio::time::Instant::now()
+                            + std::time::Duration::from_secs(120),
                         host: "example.test".into(),
                         port: 22,
                         algorithm: "ssh-ed25519".into(),

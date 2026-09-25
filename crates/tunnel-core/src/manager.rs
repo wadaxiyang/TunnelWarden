@@ -84,6 +84,12 @@ pub type LogSnapshot = VecDeque<Arc<LogEvent>>;
 #[derive(Clone, Debug)]
 pub struct HostKeyPromptView {
     pub id: u64,
+    pub tunnel_id: String,
+    pub host_id: String,
+    pub generation: u64,
+    pub attempt: u64,
+    pub hop: usize,
+    pub expires_at: Instant,
     pub host: String,
     pub port: u16,
     pub algorithm: String,
@@ -137,6 +143,7 @@ pub enum CoreCommand {
     },
     ResolveHostKey {
         id: u64,
+        generation: u64,
         decision: HostKeyDecision,
     },
     ResolveInteractive {
@@ -144,8 +151,8 @@ pub enum CoreCommand {
         generation: u64,
         answers: Option<Zeroizing<Vec<String>>>,
     },
-    InteractiveWindowOpened,
-    InteractiveWindowClosed,
+    PromptWindowOpened,
+    PromptWindowClosed,
 }
 
 pub struct SecretUpdate {
@@ -309,7 +316,8 @@ pub struct TunnelManager {
     next_host_key_id: u64,
     next_interactive_id: u64,
     next_generation: u64,
-    interactive_windows: usize,
+    prompt_windows: usize,
+    prompt_window_closed: bool,
     app_known_hosts_path: Option<PathBuf>,
     host_key_save_lock: Arc<Mutex<()>>,
 }
@@ -388,7 +396,8 @@ impl TunnelManager {
                 next_host_key_id: 1,
                 next_interactive_id: 1,
                 next_generation: 1,
-                interactive_windows: 0,
+                prompt_windows: 0,
+                prompt_window_closed: false,
                 app_known_hosts_path: None,
                 host_key_save_lock: Arc::new(Mutex::new(())),
             },
@@ -565,10 +574,12 @@ impl TunnelManager {
                             self.pending_file_jobs.insert(task.id(), FileJobReply::Exported(reply));
                         }
                     }
-                    Some(CoreCommand::ResolveHostKey { id, decision }) => {
-                        if let Some(index) = self.pending_host_keys.iter().position(|prompt| prompt.view.id == id) {
+                    Some(CoreCommand::ResolveHostKey { id, generation, decision }) => {
+                        if let Some(index) = self.pending_host_keys.iter().position(|prompt| prompt.view.id == id && prompt.view.generation == generation) {
                             let pending = self.pending_host_keys.remove(index);
-                            let _ = pending.reply.send(decision);
+                            if !pending.reply.is_closed() && pending.view.expires_at > Instant::now() {
+                                let _ = pending.reply.send(decision);
+                            }
                             self.publish_host_keys();
                         }
                     }
@@ -581,12 +592,16 @@ impl TunnelManager {
                             self.publish_interactive();
                         }
                     }
-                    Some(CoreCommand::InteractiveWindowOpened) => {
-                        self.interactive_windows = self.interactive_windows.saturating_add(1);
+                    Some(CoreCommand::PromptWindowOpened) => {
+                        self.prompt_windows = self.prompt_windows.saturating_add(1);
+                        self.prompt_window_closed = false;
                     }
-                    Some(CoreCommand::InteractiveWindowClosed) => {
-                        self.interactive_windows = self.interactive_windows.saturating_sub(1);
-                        if self.interactive_windows == 0 {
+                    Some(CoreCommand::PromptWindowClosed) => {
+                        self.prompt_windows = self.prompt_windows.saturating_sub(1);
+                        if self.prompt_windows == 0 {
+                            self.prompt_window_closed = true;
+                            self.pending_host_keys.clear();
+                            self.publish_host_keys();
                             self.pending_interactive.clear();
                             self.publish_interactive();
                         }
@@ -635,12 +650,22 @@ impl TunnelManager {
     }
 
     fn queue_host_key(&mut self, prompt: HostKeyPrompt) {
-        if self.pending_host_keys.len() >= MAX_HOST_KEY_PROMPTS {
+        if self.prompt_window_closed
+            || prompt.reply.is_closed()
+            || prompt.expires_at <= Instant::now()
+            || self.pending_host_keys.len() >= MAX_HOST_KEY_PROMPTS
+        {
             let _ = prompt.reply.send(HostKeyDecision::Cancel);
             return;
         }
         let view = HostKeyPromptView {
             id: self.next_host_key_id,
+            tunnel_id: prompt.tunnel_id,
+            host_id: prompt.host_id,
+            generation: prompt.generation,
+            attempt: prompt.attempt,
+            hop: prompt.hop,
+            expires_at: prompt.expires_at,
             host: prompt.host,
             port: prompt.port,
             algorithm: prompt.algorithm,
@@ -674,7 +699,7 @@ impl TunnelManager {
     }
 
     fn queue_interactive(&mut self, prompt: KeyboardInteractivePrompt) {
-        if self.interactive_windows == 0
+        if self.prompt_window_closed
             || prompt.reply.is_closed()
             || self.pending_interactive.len() >= MAX_INTERACTIVE_PROMPTS
         {
@@ -843,13 +868,17 @@ impl TunnelManager {
         };
         let cancellation = CancellationToken::new();
         let app_path = self.app_known_hosts_path.clone();
-        let approval = app_path.as_ref().map(|path| HostKeyApproval {
-            prompts: self.host_key_sender.clone(),
-            save_path: path.clone(),
-            save_lock: Arc::clone(&self.host_key_save_lock),
-        });
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
+        let approval = app_path.as_ref().map(|path| {
+            HostKeyApproval::new(
+                self.host_key_sender.clone(),
+                path.clone(),
+                Arc::clone(&self.host_key_save_lock),
+                id.0.clone(),
+                generation,
+            )
+        });
         let interactive =
             KeyboardInteractiveApproval::new(self.interactive_sender.clone(), id.0.clone())
                 .with_generation(generation);
@@ -1014,6 +1043,12 @@ impl TunnelManager {
         let mut tasks = Vec::with_capacity(ids.len());
         for id in ids {
             self.desired_running.remove(&id);
+            let previous_host_keys = self.pending_host_keys.len();
+            self.pending_host_keys
+                .retain(|pending| pending.view.tunnel_id != id.0);
+            if self.pending_host_keys.len() != previous_host_keys {
+                self.publish_host_keys();
+            }
             let previous = self.pending_interactive.len();
             self.pending_interactive
                 .retain(|pending| pending.view.tunnel_id != id.0);
@@ -1039,7 +1074,7 @@ impl TunnelManager {
     async fn refresh(&mut self) {
         let previous_prompts = self.pending_host_keys.len();
         self.pending_host_keys
-            .retain(|prompt| !prompt.reply.is_closed());
+            .retain(|prompt| !prompt.reply.is_closed() && prompt.view.expires_at > Instant::now());
         if self.pending_host_keys.len() != previous_prompts {
             self.publish_host_keys();
         }
@@ -2010,6 +2045,12 @@ mod config_tests {
         assert!(
             sender
                 .try_send(HostKeyPrompt {
+                    tunnel_id: "test-tunnel".into(),
+                    host_id: "test-host".into(),
+                    generation: 5,
+                    attempt: 1,
+                    hop: 1,
+                    expires_at: Instant::now() + Duration::from_secs(120),
                     host: "example.test".into(),
                     port: 22,
                     algorithm: "ssh-ed25519".into(),
@@ -2024,6 +2065,7 @@ mod config_tests {
             handle
                 .try_send(CoreCommand::ResolveHostKey {
                     id,
+                    generation: 5,
                     decision: HostKeyDecision::TrustOnce
                 })
                 .is_ok()
@@ -2034,6 +2076,105 @@ mod config_tests {
         );
         views.changed().await.expect("prompt removed");
         assert!(views.borrow_and_update().is_empty());
+        handle.shutdown();
+        task.await.expect("manager shutdown");
+    }
+
+    #[tokio::test]
+    async fn host_key_stale_generation_expiry_and_window_close_cannot_approve() {
+        let (manager, handle) = TunnelManager::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        let sender = manager.host_key_sender.clone();
+        let task = tokio::spawn(manager.run());
+        let mut views = handle.subscribe_host_keys();
+        handle
+            .try_send(CoreCommand::PromptWindowOpened)
+            .expect("open window");
+        let (expired_reply, expired_answer) = oneshot::channel();
+        sender
+            .try_send(HostKeyPrompt {
+                tunnel_id: "tunnel".into(),
+                host_id: "host".into(),
+                generation: 1,
+                attempt: 1,
+                hop: 1,
+                expires_at: Instant::now() - Duration::from_millis(1),
+                host: "example.test".into(),
+                port: 22,
+                algorithm: "ssh-ed25519".into(),
+                fingerprint: "SHA256:old".into(),
+                reply: expired_reply,
+            })
+            .expect("expired prompt queued");
+        assert_eq!(
+            expired_answer.await.expect("expired decision"),
+            HostKeyDecision::Cancel
+        );
+        let (first_reply, mut first_answer) = oneshot::channel();
+        let (second_reply, second_answer) = oneshot::channel();
+        for (generation, fingerprint, reply) in [
+            (2, "SHA256:first", first_reply),
+            (3, "SHA256:second", second_reply),
+        ] {
+            sender
+                .try_send(HostKeyPrompt {
+                    tunnel_id: "tunnel".into(),
+                    host_id: "host".into(),
+                    generation,
+                    attempt: 1,
+                    hop: 1,
+                    expires_at: Instant::now() + Duration::from_secs(120),
+                    host: "example.test".into(),
+                    port: 22,
+                    algorithm: "ssh-ed25519".into(),
+                    fingerprint: fingerprint.into(),
+                    reply,
+                })
+                .expect("prompt queued");
+        }
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                views.changed().await.expect("prompt state");
+                if views.borrow_and_update().len() == 2 {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("both prompts visible");
+        let id = views.borrow()[0].id;
+        handle
+            .try_send(CoreCommand::ResolveHostKey {
+                id,
+                generation: 3,
+                decision: HostKeyDecision::TrustOnce,
+            })
+            .expect("stale command");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut first_answer)
+                .await
+                .is_err()
+        );
+        handle
+            .try_send(CoreCommand::ResolveHostKey {
+                id,
+                generation: 2,
+                decision: HostKeyDecision::TrustOnce,
+            })
+            .expect("current command");
+        assert_eq!(
+            first_answer.await.expect("first decision"),
+            HostKeyDecision::TrustOnce
+        );
+        handle
+            .try_send(CoreCommand::PromptWindowClosed)
+            .expect("close window");
+        assert!(second_answer.await.is_err());
         handle.shutdown();
         task.await.expect("manager shutdown");
     }

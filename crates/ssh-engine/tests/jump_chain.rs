@@ -156,11 +156,13 @@ async fn unknown_key_requires_explicit_approval_and_saves_app_known_hosts() {
     let directory = TempDir::new().expect("temporary directory");
     let known_hosts = directory.path().join("known_hosts");
     let (prompts, mut requests) = mpsc::channel(1);
-    let approval = HostKeyApproval {
+    let approval = HostKeyApproval::new(
         prompts,
-        save_path: known_hosts.clone(),
-        save_lock: Arc::new(Mutex::new(())),
-    };
+        known_hosts.clone(),
+        Arc::new(Mutex::new(())),
+        "test-tunnel".into(),
+        1,
+    );
     let cancellation = CancellationToken::new();
     let task = tokio::spawn(async move {
         SshChain::connect_with_approval(
@@ -180,6 +182,9 @@ async fn unknown_key_requires_explicit_approval_and_saves_app_known_hosts() {
         .expect("host key prompt timeout")
         .expect("host key prompt");
     assert_eq!(prompt.port, address.port());
+    assert_eq!(prompt.tunnel_id, "test-tunnel");
+    assert_eq!(prompt.host_id, "target");
+    assert_eq!((prompt.generation, prompt.attempt, prompt.hop), (1, 1, 1));
     assert!(prompt.fingerprint.starts_with("SHA256:"));
     assert!(prompt.algorithm.contains("ed25519"));
     prompt
@@ -215,11 +220,13 @@ async fn silent_server_uses_network_timeout_even_when_approval_is_available() {
     });
     let directory = TempDir::new().expect("temporary directory");
     let (prompts, mut requests) = mpsc::channel(1);
-    let approval = HostKeyApproval {
+    let approval = HostKeyApproval::new(
         prompts,
-        save_path: directory.path().join("known_hosts"),
-        save_lock: Arc::new(Mutex::new(())),
-    };
+        directory.path().join("known_hosts"),
+        Arc::new(Mutex::new(())),
+        "test-tunnel".into(),
+        1,
+    );
     let mut target = host("silent", address);
     target.connect_timeout = Duration::from_millis(200);
     let cancellation = CancellationToken::new();

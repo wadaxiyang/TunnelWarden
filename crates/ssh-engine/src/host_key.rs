@@ -3,7 +3,7 @@ use std::{
     path::PathBuf,
     sync::{
         Arc,
-        atomic::{AtomicU32, Ordering},
+        atomic::{AtomicU32, AtomicU64, Ordering},
     },
 };
 
@@ -14,7 +14,7 @@ use russh::{
 use thiserror::Error;
 use tokio::{
     sync::{Mutex, mpsc, oneshot},
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tunnel_domain::{HostKeyPolicy, RemoteEndpoint};
 
@@ -36,6 +36,12 @@ pub enum HostKeyDecision {
 }
 
 pub struct HostKeyPrompt {
+    pub tunnel_id: String,
+    pub host_id: String,
+    pub generation: u64,
+    pub attempt: u64,
+    pub hop: usize,
+    pub expires_at: Instant,
     pub host: String,
     pub port: u16,
     pub algorithm: String,
@@ -48,6 +54,51 @@ pub struct HostKeyApproval {
     pub prompts: mpsc::Sender<HostKeyPrompt>,
     pub save_path: PathBuf,
     pub save_lock: Arc<Mutex<()>>,
+    tunnel_id: String,
+    generation: u64,
+    attempts: Arc<AtomicU64>,
+    attempt: u64,
+    hop: usize,
+    host_id: String,
+}
+
+impl HostKeyApproval {
+    pub fn new(
+        prompts: mpsc::Sender<HostKeyPrompt>,
+        save_path: PathBuf,
+        save_lock: Arc<Mutex<()>>,
+        tunnel_id: String,
+        generation: u64,
+    ) -> Self {
+        Self {
+            prompts,
+            save_path,
+            save_lock,
+            tunnel_id,
+            generation,
+            attempts: Arc::new(AtomicU64::new(0)),
+            attempt: 0,
+            hop: 0,
+            host_id: String::new(),
+        }
+    }
+
+    pub(crate) fn next_attempt(&self) -> Self {
+        let mut next = self.clone();
+        next.attempt = self
+            .attempts
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1)
+            .max(1);
+        next
+    }
+
+    pub(crate) fn for_hop(&self, hop: usize, host_id: &str) -> Self {
+        let mut next = self.clone();
+        next.hop = hop;
+        next.host_id = host_id.to_owned();
+        next
+    }
 }
 
 #[derive(Debug, Error)]
@@ -205,6 +256,12 @@ impl client::Handler for HostKeyVerifier {
         approval
             .prompts
             .try_send(HostKeyPrompt {
+                tunnel_id: approval.tunnel_id.clone(),
+                host_id: approval.host_id.clone(),
+                generation: approval.generation,
+                attempt: approval.attempt,
+                hop: approval.hop,
+                expires_at: Instant::now() + Duration::from_secs(120),
                 host: self.host.clone(),
                 port: self.port,
                 algorithm: key.algorithm().to_string(),
