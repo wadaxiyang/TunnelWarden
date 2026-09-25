@@ -1,12 +1,14 @@
 use std::{
+    cell::Cell,
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
 };
 
-use config_store::{ConfigDocument, DomainConfig, SshImportPreview};
+use config_store::{ConfigDocument, DomainConfig, SshImportPreview, ThemePreference};
 use gpui_kit::base::{Disableable, Selectable, StyledExt};
 use gpui_kit::component::{
-    ActiveTheme,
+    ActiveTheme, Theme,
     button::{Button, ButtonVariants},
     input::{Input, InputContentType, InputEvent, InputState},
     scroll::ScrollableElement,
@@ -27,7 +29,10 @@ use tunnel_domain::TunnelMode;
 use tunnel_domain::{AuthConfig, GroupId, HostId, HostKeyPolicy, SecretRef, TunnelGroup, TunnelId};
 use zeroize::Zeroizing;
 
-use crate::editor::{Editor, HostEditor, TunnelEditor};
+use crate::{
+    editor::{Editor, HostEditor, TunnelEditor},
+    theme,
+};
 
 const PAGE_SIZE: usize = 25;
 
@@ -107,6 +112,8 @@ pub struct Workspace {
     runtime_error: Option<String>,
     _updates: Option<Task<()>>,
     _host_key_updates: Option<Task<()>>,
+    _appearance_subscription: Subscription,
+    theme_preference: Rc<Cell<ThemePreference>>,
     _interactive_updates: Option<Task<()>>,
     _log_updates: Option<Task<()>>,
     host_key_prompts: Arc<Vec<HostKeyPromptView>>,
@@ -141,7 +148,13 @@ impl Workspace {
         directory: PathBuf,
         receipt: SaveReceipt,
         submitted_context: u64,
+        cx: &mut Context<Self>,
     ) {
+        let preference = receipt.canonical_config.app.theme;
+        if self.theme_preference.get() != preference {
+            self.theme_preference.set(preference);
+            theme::apply_preference(preference, None, cx);
+        }
         self.startup = Ok((directory, receipt.canonical_config));
         if self.context_session == submitted_context {
             self.editor = None;
@@ -171,6 +184,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let preference = startup
+            .as_ref()
+            .map_or(ThemePreference::System, |(_, config)| config.app.theme);
+        let theme_preference = Rc::new(Cell::new(preference));
+        theme::apply_preference(preference, Some(window), cx);
+        let observed_preference = Rc::clone(&theme_preference);
+        let appearance_subscription = window.observe_window_appearance(move |window, cx| {
+            if observed_preference.get() == ThemePreference::System {
+                Theme::sync_system_appearance(Some(window), cx);
+            }
+        });
         if let Some(manager) = &manager {
             let _ = manager.try_send(CoreCommand::PromptWindowOpened);
         }
@@ -285,6 +309,8 @@ impl Workspace {
             runtime_error,
             _updates: updates,
             _host_key_updates: host_key_updates,
+            _appearance_subscription: appearance_subscription,
+            theme_preference,
             _interactive_updates: interactive_updates,
             _log_updates: log_updates,
             host_key_prompts,
@@ -580,7 +606,9 @@ impl Workspace {
             let _ = this.update(cx, |view, cx| {
                 view.saving = false;
                 match result {
-                    Ok(receipt) => view.apply_save_receipt(directory, receipt, submitted_context),
+                    Ok(receipt) => {
+                        view.apply_save_receipt(directory, receipt, submitted_context, cx)
+                    }
                     Err(error) => view.command_error = Some(error),
                 }
                 cx.notify();
@@ -1471,6 +1499,31 @@ impl Workspace {
                     .disabled(self.file_busy || self.saving)
                     .on_click(cx.listener(|this, _, _, cx| this.choose_ssh_import(cx))),
             );
+        let mut choices = div().flex().gap_2();
+        for (id, label, preference) in [
+            ("theme-system", "System", ThemePreference::System),
+            ("theme-light", "Light", ThemePreference::Light),
+            ("theme-dark", "Dark", ThemePreference::Dark),
+        ] {
+            choices = choices.child(
+                Button::new(id)
+                    .label(label)
+                    .selected(config.app.theme == preference)
+                    .disabled(self.saving)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let Ok((directory, current)) = &this.startup else {
+                            return;
+                        };
+                        if current.app.theme == preference {
+                            return;
+                        }
+                        let mut config = current.clone();
+                        config.app.theme = preference;
+                        this.persist_config(directory.clone(), config, None, false, cx);
+                    })),
+            );
+        }
+        body = body.child("Appearance").child(choices);
         if let Some(message) = &self.file_message {
             body = body.child(message.clone());
         }
@@ -2499,6 +2552,7 @@ mod ui_tests {
                             warnings: Vec::new(),
                         },
                         submitted_context,
+                        cx,
                     );
                     assert!(matches!(&view.editor, Some(Editor::Host(editor)) if editor.name.read(cx).value() == "Later draft"));
                     assert_eq!(
@@ -2643,6 +2697,55 @@ mod ui_tests {
                 })
                 .expect("host key action");
         });
+    }
+
+    #[gpui_kit::test]
+    fn saved_theme_changes_apply_to_gpui_kit_and_settings(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let mut config = ConfigDocument::default()
+            .into_domain()
+            .expect("default config");
+        config.app.theme = ThemePreference::Dark;
+        let handle = cx.add_window(move |window, cx| {
+            Workspace::new(Ok((PathBuf::new(), config)), None, None, window, cx)
+        });
+        cx.update(|app| {
+            assert_eq!(
+                Theme::global(app).mode,
+                gpui_kit::component::ThemeMode::Dark
+            )
+        });
+        let mut saved = ConfigDocument::default()
+            .into_domain()
+            .expect("saved config");
+        saved.app.theme = ThemePreference::Light;
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, cx| {
+                    view.apply_save_receipt(
+                        PathBuf::new(),
+                        SaveReceipt {
+                            canonical_config: saved,
+                            warnings: Vec::new(),
+                        },
+                        view.context_session,
+                        cx,
+                    );
+                })
+                .expect("workspace");
+            assert_eq!(
+                Theme::global(app).mode,
+                gpui_kit::component::ThemeMode::Light
+            );
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.render_frame(cx);
+            window.click("Settings", cx);
+            assert!(window.find("theme-system").visible());
+            assert!(window.find("theme-light").visible());
+            assert!(window.find("theme-dark").visible());
+        })
+        .expect("workspace window");
     }
 
     #[gpui_kit::test]

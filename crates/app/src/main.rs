@@ -4,6 +4,7 @@ mod instance;
 #[cfg(windows)]
 mod network;
 mod runtime_host;
+mod theme;
 #[cfg(windows)]
 mod tray;
 mod workspace;
