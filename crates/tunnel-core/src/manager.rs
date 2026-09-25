@@ -17,7 +17,7 @@ use ssh_engine::{
 use thiserror::Error;
 use tokio::{
     sync::{Mutex, Notify, mpsc, oneshot, watch},
-    task::JoinHandle,
+    task::{JoinHandle, JoinSet},
     time::{Instant, interval, timeout, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
@@ -192,6 +192,11 @@ struct PendingHostKey {
     reply: oneshot::Sender<HostKeyDecision>,
 }
 
+struct PendingSave {
+    config: DomainConfig,
+    reply: oneshot::Sender<Result<SaveReceipt, String>>,
+}
+
 /// Single writer for desired tunnel state and the bounded UI snapshot. It owns
 /// every supervisor task, cancellation token, and completion handle.
 pub struct TunnelManager {
@@ -206,6 +211,8 @@ pub struct TunnelManager {
     log_views: watch::Sender<Arc<LogSnapshot>>,
     active: HashMap<TunnelId, ActiveTunnel>,
     desired_running: HashSet<TunnelId>,
+    save_tasks: JoinSet<Result<SaveOutcome, String>>,
+    pending_save: Option<PendingSave>,
     shutdown: CancellationToken,
     auto_start: Vec<TunnelId>,
     host_key_sender: mpsc::Sender<HostKeyPrompt>,
@@ -272,6 +279,8 @@ impl TunnelManager {
                 log_views,
                 active: HashMap::new(),
                 desired_running: HashSet::new(),
+                save_tasks: JoinSet::new(),
+                pending_save: None,
                 shutdown: shutdown.clone(),
                 auto_start,
                 host_key_sender,
@@ -363,23 +372,21 @@ impl TunnelManager {
                         }
                     }
                     Some(CoreCommand::SaveConfig { directory, config, secret, reply }) => {
-                        let old_run_at_login = self.config_views.borrow().app.run_at_startup;
-                        let canonical = ConfigDocument::try_from(config)
-                            .and_then(ConfigDocument::into_domain)
-                            .map_err(|error| error.to_string());
-                        let result = match canonical {
+                        if self.pending_save.is_some() {
+                            let _ = reply.send(Err("Another configuration save is in progress".into()));
+                            continue;
+                        }
+                        match ConfigDocument::try_from(config).and_then(ConfigDocument::into_domain) {
                             Ok(config) => {
-                                match Self::persist_config(directory, config.clone(), secret, old_run_at_login).await {
-                                    Ok(outcome) => {
-                                        self.replace_config(config.clone()).await;
-                                        Ok(SaveReceipt { canonical_config: config, warnings: outcome.warnings })
-                                    }
-                                    Err(error) => Err(error),
-                                }
+                                let old_run_at_login = self.config_views.borrow().app.run_at_startup;
+                                let to_write = config.clone();
+                                self.save_tasks.spawn_blocking(move || {
+                                    Self::persist_config_blocking(directory, to_write, secret, old_run_at_login)
+                                });
+                                self.pending_save = Some(PendingSave { config, reply });
                             }
-                            Err(error) => Err(error),
-                        };
-                        let _ = reply.send(result);
+                            Err(error) => { let _ = reply.send(Err(error.to_string())); }
+                        }
                     }
                     Some(CoreCommand::ImportConfig { path, reply }) => {
                         let result = tokio::task::spawn_blocking(move || ConfigStore::import_file(&path).map_err(|error| error.to_string()))
@@ -405,6 +412,26 @@ impl TunnelManager {
                     }
                     None => break,
                 },
+                completed = self.save_tasks.join_next(), if self.pending_save.is_some() => {
+                    if let Some(pending) = self.pending_save.take() {
+                        match completed {
+                            Some(Ok(Ok(outcome))) => {
+                                self.replace_config(pending.config.clone()).await;
+                                let _ = pending.reply.send(Ok(SaveReceipt {
+                                    canonical_config: pending.config,
+                                    warnings: outcome.warnings,
+                                }));
+                            }
+                            Some(Ok(Err(error))) => { let _ = pending.reply.send(Err(error)); }
+                            Some(Err(error)) => {
+                                let _ = pending.reply.send(Err(format!(
+                                    "Configuration commit status is unknown; reload the file before retrying: {error}"
+                                )));
+                            }
+                            None => { let _ = pending.reply.send(Err("Configuration worker ended without a result".into())); }
+                        }
+                    }
+                },
                 prompt = self.host_key_requests.recv() => {
                     if let Some(prompt) = prompt { self.queue_host_key(prompt); }
                 },
@@ -421,6 +448,19 @@ impl TunnelManager {
                 active.task.abort();
                 let _ = active.task.await;
             }
+        }
+        if let Some(pending) = self.pending_save.take() {
+            let result = timeout_at(deadline, self.save_tasks.join_next()).await;
+            let message = match result {
+                Ok(Some(Ok(Ok(_)))) => {
+                    "Configuration was committed while the runtime was closing; reload it on next start"
+                }
+                Ok(Some(Ok(Err(_)))) => "Configuration save failed while the runtime was closing",
+                _ => {
+                    "Configuration commit status is unknown during shutdown; inspect the file on next start"
+                }
+            };
+            let _ = pending.reply.send(Err(message.into()));
         }
     }
 
@@ -463,40 +503,36 @@ impl TunnelManager {
         ));
     }
 
-    async fn persist_config(
+    fn persist_config_blocking(
         directory: PathBuf,
         config: DomainConfig,
         secret: Option<SecretUpdate>,
         old_run_at_login: bool,
     ) -> Result<SaveOutcome, String> {
-        tokio::task::spawn_blocking(move || {
-            let run_at_login = config.app.run_at_startup;
-            let document = ConfigDocument::try_from(config).map_err(|error| error.to_string())?;
-            if let Some(secret) = &secret {
-                SecretStore::save(&secret.reference, &secret.value)
-                    .map_err(|error| error.to_string())?;
-            }
-            match ConfigStore::new(directory).save(document) {
-                Ok(mut outcome) => {
-                    if run_at_login != old_run_at_login
-                        && let Err(error) = set_run_at_login(run_at_login)
-                    {
-                        outcome.warnings.push(format!(
-                            "Configuration saved, but login startup was not applied: {error}"
-                        ));
-                    }
-                    Ok(outcome)
+        let run_at_login = config.app.run_at_startup;
+        let document = ConfigDocument::try_from(config).map_err(|error| error.to_string())?;
+        if let Some(secret) = &secret {
+            SecretStore::save(&secret.reference, &secret.value)
+                .map_err(|error| error.to_string())?;
+        }
+        match ConfigStore::new(directory).save(document) {
+            Ok(mut outcome) => {
+                if run_at_login != old_run_at_login
+                    && let Err(error) = set_run_at_login(run_at_login)
+                {
+                    outcome.warnings.push(format!(
+                        "Configuration saved, but login startup was not applied: {error}"
+                    ));
                 }
-                Err(error) => {
-                    if let Some(secret) = &secret {
-                        let _ = SecretStore::delete(&secret.reference);
-                    }
-                    Err(error.to_string())
-                }
+                Ok(outcome)
             }
-        })
-        .await
-        .map_err(|error| error.to_string())?
+            Err(error) => {
+                if let Some(secret) = &secret {
+                    let _ = SecretStore::delete(&secret.reference);
+                }
+                Err(error.to_string())
+            }
+        }
     }
 
     async fn replace_config(&mut self, config: DomainConfig) {
@@ -1334,6 +1370,88 @@ mod config_tests {
         assert!(!receipt.canonical_config.app.minimize_to_tray);
         assert!(!handle.subscribe_config().borrow().app.minimize_to_tray);
         assert!(!store.load().expect("committed file").app.minimize_to_tray);
+        handle.shutdown();
+        task.await.expect("manager shutdown");
+    }
+
+    #[tokio::test]
+    async fn slow_config_write_does_not_block_stop_command() {
+        let directory = TempDir::new().expect("temporary directory");
+        ConfigStore::new(directory.path().to_path_buf())
+            .save(ConfigDocument::default())
+            .expect("initial config");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.path().join("config.lock"))
+            .expect("config lock file");
+        lock.lock().expect("hold config write lock");
+        let reserve = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let port = reserve.local_addr().expect("reserved address").port();
+        drop(reserve);
+        let tunnel = test_tunnel("127.0.0.1", port);
+        let (manager, handle) = TunnelManager::new(
+            vec![test_host()],
+            Vec::new(),
+            vec![tunnel.clone()],
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        let task = tokio::spawn(manager.run());
+        let mut snapshots = handle.subscribe();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                snapshots.changed().await.expect("snapshot update");
+                if snapshots.borrow_and_update()[&tunnel.id]
+                    .local_addr
+                    .is_some()
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("listener bound");
+        let (reply, mut answer) = oneshot::channel();
+        handle
+            .try_send(CoreCommand::SaveConfig {
+                directory: directory.path().to_path_buf(),
+                config: DomainConfig {
+                    app: AppSettings::default(),
+                    hosts: vec![test_host()],
+                    groups: Vec::new(),
+                    tunnels: vec![tunnel.clone()],
+                },
+                secret: None,
+                reply,
+            })
+            .expect("queue save");
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut answer)
+                .await
+                .is_err()
+        );
+        handle
+            .try_send(CoreCommand::StopTunnel(tunnel.id.clone()))
+            .expect("queue stop");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                snapshots.changed().await.expect("snapshot update");
+                if matches!(
+                    snapshots.borrow_and_update()[&tunnel.id].state,
+                    SupervisorState::Stopped
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("stop while save waits for lock");
+        std::net::TcpListener::bind(("127.0.0.1", port)).expect("listener released");
+        drop(lock);
+        answer.await.expect("save reply").expect("save completes");
         handle.shutdown();
         task.await.expect("manager shutdown");
     }

@@ -196,6 +196,21 @@ fn menu_action(id: &str) -> Option<TrayAction> {
     }
 }
 
+fn make_icon() -> Result<Icon, String> {
+    let mut rgba = vec![0u8; 32 * 32 * 4];
+    for y in 0..32 {
+        for x in 0..32 {
+            let center = (x as i32 - 16).abs();
+            let inside = (3..=27).contains(&y) && center <= (13 - (y as i32 / 5)).max(5);
+            if inside {
+                let offset = (y * 32 + x) * 4;
+                rgba[offset..offset + 4].copy_from_slice(&[35, 142, 190, 255]);
+            }
+        }
+    }
+    Icon::from_rgba(rgba, 32, 32).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -211,19 +226,4 @@ mod tests {
             Some(TrayAction::Tunnel(TunnelId(id), TunnelAction::Stop)) if id == "demo"
         ));
     }
-}
-
-fn make_icon() -> Result<Icon, String> {
-    let mut rgba = vec![0u8; 32 * 32 * 4];
-    for y in 0..32 {
-        for x in 0..32 {
-            let center = (x as i32 - 16).abs();
-            let inside = (3..=27).contains(&y) && center <= (13 - (y as i32 / 5)).max(5);
-            if inside {
-                let offset = (y * 32 + x) * 4;
-                rgba[offset..offset + 4].copy_from_slice(&[35, 142, 190, 255]);
-            }
-        }
-    }
-    Icon::from_rgba(rgba, 32, 32).map_err(|error| error.to_string())
 }
