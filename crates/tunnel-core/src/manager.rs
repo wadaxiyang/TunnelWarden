@@ -35,6 +35,7 @@ const MAX_TUNNELS: usize = 1024;
 const COMMAND_CAPACITY: usize = 128;
 const STOP_DEADLINE: Duration = Duration::from_secs(3);
 const MAX_HOST_KEY_PROMPTS: usize = 16;
+const MAX_FILE_JOBS: usize = 4;
 const MAX_LOG_EVENTS: usize = 500;
 
 /// Blocking OS credential-store access. The manager always invokes this on a
@@ -199,6 +200,49 @@ struct PendingSave {
     reply: oneshot::Sender<Result<SaveReceipt, String>>,
 }
 
+enum FileJobResult {
+    Imported(Result<DomainConfig, String>),
+    SshPreview(Result<SshImportPreview, String>),
+    Exported(Result<(), String>),
+}
+
+enum FileJobReply {
+    Imported(oneshot::Sender<Result<DomainConfig, String>>),
+    SshPreview(oneshot::Sender<Result<SshImportPreview, String>>),
+    Exported(oneshot::Sender<Result<(), String>>),
+}
+
+impl FileJobReply {
+    fn finish(self, result: FileJobResult) {
+        match (self, result) {
+            (Self::Imported(reply), FileJobResult::Imported(result)) => {
+                let _ = reply.send(result);
+            }
+            (Self::SshPreview(reply), FileJobResult::SshPreview(result)) => {
+                let _ = reply.send(result);
+            }
+            (Self::Exported(reply), FileJobResult::Exported(result)) => {
+                let _ = reply.send(result);
+            }
+            _ => unreachable!("file job result must match its owner"),
+        }
+    }
+
+    fn fail(self, reason: &str) {
+        match self {
+            Self::Imported(reply) => {
+                let _ = reply.send(Err(reason.to_owned()));
+            }
+            Self::SshPreview(reply) => {
+                let _ = reply.send(Err(reason.to_owned()));
+            }
+            Self::Exported(reply) => {
+                let _ = reply.send(Err(reason.to_owned()));
+            }
+        }
+    }
+}
+
 /// Single writer for desired tunnel state and the bounded UI snapshot. It owns
 /// every supervisor task, cancellation token, and completion handle.
 pub struct TunnelManager {
@@ -215,6 +259,8 @@ pub struct TunnelManager {
     desired_running: HashSet<TunnelId>,
     save_tasks: JoinSet<Result<SaveOutcome, String>>,
     pending_save: Option<PendingSave>,
+    file_tasks: JoinSet<FileJobResult>,
+    pending_file_jobs: HashMap<tokio::task::Id, FileJobReply>,
     shutdown: CancellationToken,
     auto_start: Vec<TunnelId>,
     host_key_sender: mpsc::Sender<HostKeyPrompt>,
@@ -283,6 +329,8 @@ impl TunnelManager {
                 desired_running: HashSet::new(),
                 save_tasks: JoinSet::new(),
                 pending_save: None,
+                file_tasks: JoinSet::new(),
+                pending_file_jobs: HashMap::new(),
                 shutdown: shutdown.clone(),
                 auto_start,
                 host_key_sender,
@@ -330,6 +378,49 @@ impl TunnelManager {
             tokio::select! {
                 biased;
                 _ = self.shutdown.cancelled() => break,
+                completed = self.file_tasks.join_next_with_id(), if !self.pending_file_jobs.is_empty() => {
+                    match completed {
+                        Some(Ok((id, result))) => {
+                            if let Some(reply) = self.pending_file_jobs.remove(&id) {
+                                reply.finish(result);
+                            }
+                        }
+                        Some(Err(error)) => {
+                            if let Some(reply) = self.pending_file_jobs.remove(&error.id()) {
+                                reply.fail(&format!("File operation failed: {error}"));
+                            }
+                        }
+                        None => {
+                            for (_, reply) in self.pending_file_jobs.drain() {
+                                reply.fail("File operation ended without a result");
+                            }
+                        }
+                    }
+                },
+                completed = self.save_tasks.join_next(), if self.pending_save.is_some() => {
+                    if let Some(pending) = self.pending_save.take() {
+                        match completed {
+                            Some(Ok(Ok(outcome))) => {
+                                self.replace_config(pending.config.clone(), pending.stop_running_on_commit).await;
+                                let _ = pending.reply.send(Ok(SaveReceipt {
+                                    canonical_config: pending.config,
+                                    warnings: outcome.warnings,
+                                }));
+                            }
+                            Some(Ok(Err(error))) => { let _ = pending.reply.send(Err(error)); }
+                            Some(Err(error)) => {
+                                let _ = pending.reply.send(Err(format!(
+                                    "Configuration commit status is unknown; reload the file before retrying: {error}"
+                                )));
+                            }
+                            None => { let _ = pending.reply.send(Err("Configuration worker ended without a result".into())); }
+                        }
+                    }
+                },
+                prompt = self.host_key_requests.recv() => {
+                    if let Some(prompt) = prompt { self.queue_host_key(prompt); }
+                },
+                _ = poll.tick(), if !self.active.is_empty() => self.refresh().await,
                 command = self.commands.recv() => match command {
                     Some(CoreCommand::StartAll) => {
                         let ids: Vec<_> = self.tunnels.keys().cloned().collect();
@@ -391,19 +482,34 @@ impl TunnelManager {
                         }
                     }
                     Some(CoreCommand::ImportConfig { path, reply }) => {
-                        let result = tokio::task::spawn_blocking(move || ConfigStore::import_file(&path).map_err(|error| error.to_string()))
-                            .await.map_err(|error| error.to_string()).and_then(|result| result);
-                        let _ = reply.send(result);
+                        if self.pending_file_jobs.len() >= MAX_FILE_JOBS {
+                            let _ = reply.send(Err("Too many file operations are in progress".into()));
+                        } else {
+                            let task = self.file_tasks.spawn_blocking(move || FileJobResult::Imported(
+                                ConfigStore::import_file(&path).map_err(|error| error.to_string())
+                            ));
+                            self.pending_file_jobs.insert(task.id(), FileJobReply::Imported(reply));
+                        }
                     }
                     Some(CoreCommand::PreviewSshConfig { path, reply }) => {
-                        let result = tokio::task::spawn_blocking(move || preview_ssh_config(&path).map_err(|error| error.to_string()))
-                            .await.map_err(|error| error.to_string()).and_then(|result| result);
-                        let _ = reply.send(result);
+                        if self.pending_file_jobs.len() >= MAX_FILE_JOBS {
+                            let _ = reply.send(Err("Too many file operations are in progress".into()));
+                        } else {
+                            let task = self.file_tasks.spawn_blocking(move || FileJobResult::SshPreview(
+                                preview_ssh_config(&path).map_err(|error| error.to_string())
+                            ));
+                            self.pending_file_jobs.insert(task.id(), FileJobReply::SshPreview(reply));
+                        }
                     }
                     Some(CoreCommand::ExportConfig { path, config, reply }) => {
-                        let result = tokio::task::spawn_blocking(move || ConfigStore::export_file(&path, config).map_err(|error| error.to_string()))
-                            .await.map_err(|error| error.to_string()).and_then(|result| result);
-                        let _ = reply.send(result);
+                        if self.pending_file_jobs.len() >= MAX_FILE_JOBS {
+                            let _ = reply.send(Err("Too many file operations are in progress".into()));
+                        } else {
+                            let task = self.file_tasks.spawn_blocking(move || FileJobResult::Exported(
+                                ConfigStore::export_file(&path, config).map_err(|error| error.to_string())
+                            ));
+                            self.pending_file_jobs.insert(task.id(), FileJobReply::Exported(reply));
+                        }
                     }
                     Some(CoreCommand::ResolveHostKey { id, decision }) => {
                         if let Some(index) = self.pending_host_keys.iter().position(|prompt| prompt.view.id == id) {
@@ -414,30 +520,6 @@ impl TunnelManager {
                     }
                     None => break,
                 },
-                completed = self.save_tasks.join_next(), if self.pending_save.is_some() => {
-                    if let Some(pending) = self.pending_save.take() {
-                        match completed {
-                            Some(Ok(Ok(outcome))) => {
-                                self.replace_config(pending.config.clone(), pending.stop_running_on_commit).await;
-                                let _ = pending.reply.send(Ok(SaveReceipt {
-                                    canonical_config: pending.config,
-                                    warnings: outcome.warnings,
-                                }));
-                            }
-                            Some(Ok(Err(error))) => { let _ = pending.reply.send(Err(error)); }
-                            Some(Err(error)) => {
-                                let _ = pending.reply.send(Err(format!(
-                                    "Configuration commit status is unknown; reload the file before retrying: {error}"
-                                )));
-                            }
-                            None => { let _ = pending.reply.send(Err("Configuration worker ended without a result".into())); }
-                        }
-                    }
-                },
-                prompt = self.host_key_requests.recv() => {
-                    if let Some(prompt) = prompt { self.queue_host_key(prompt); }
-                },
-                _ = poll.tick(), if !self.active.is_empty() => self.refresh().await,
             }
         }
         for active in self.active.values() {
@@ -463,6 +545,18 @@ impl TunnelManager {
                 }
             };
             let _ = pending.reply.send(Err(message.into()));
+        }
+        for (_, reply) in self.pending_file_jobs.drain() {
+            reply.fail("File operation outcome is unknown during shutdown; inspect the destination before retrying");
+        }
+        self.file_tasks.abort_all();
+        while !self.file_tasks.is_empty() {
+            if timeout_at(deadline, self.file_tasks.join_next())
+                .await
+                .is_err()
+            {
+                break;
+            }
         }
     }
 
@@ -1203,6 +1297,46 @@ mod config_tests {
         assert!(!manager.active.contains_key(&tunnel.id));
         assert!(!manager.desired_running.contains(&tunnel.id));
         std::net::TcpListener::bind(("127.0.0.1", port)).expect("import released listener");
+    }
+
+    #[tokio::test]
+    async fn slow_file_job_does_not_block_stop_command() {
+        let reserve = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let port = reserve.local_addr().expect("reserved address").port();
+        drop(reserve);
+        let tunnel = test_tunnel("127.0.0.1", port);
+        let (mut manager, handle) = TunnelManager::new(
+            vec![test_host()],
+            Vec::new(),
+            vec![tunnel.clone()],
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        manager.start(&tunnel.id).await;
+        let (reply, _answer) = oneshot::channel();
+        let task = manager.file_tasks.spawn_blocking(|| {
+            std::thread::sleep(Duration::from_millis(400));
+            FileJobResult::Imported(Err("simulated slow file read".into()))
+        });
+        manager
+            .pending_file_jobs
+            .insert(task.id(), FileJobReply::Imported(reply));
+        let runner = tokio::spawn(manager.run());
+        handle
+            .try_send(CoreCommand::StopTunnel(tunnel.id.clone()))
+            .expect("send stop");
+        tokio::time::timeout(Duration::from_millis(250), async {
+            loop {
+                if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("stop released listener while file job was pending");
+        handle.shutdown();
+        runner.await.expect("manager stopped");
     }
 
     #[tokio::test]
