@@ -18,7 +18,7 @@ use thiserror::Error;
 use tokio::{
     sync::{Mutex, Notify, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
-    time::{Instant, interval, timeout, timeout_at},
+    time::{Instant, interval, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 use tunnel_domain::{
@@ -334,8 +334,8 @@ impl TunnelManager {
                         for id in ids { self.start(&id).await; }
                     }
                     Some(CoreCommand::StopAll) => {
-                        let ids: Vec<_> = self.active.keys().cloned().collect();
-                        for id in ids { self.stop(&id).await; }
+                        let ids: Vec<_> = self.tunnels.keys().cloned().collect();
+                        self.stop_many(ids).await;
                     }
                     Some(CoreCommand::StartGroup(group)) => {
                         let ids: Vec<_> = self.tunnels.iter()
@@ -347,7 +347,7 @@ impl TunnelManager {
                         let ids: Vec<_> = self.tunnels.iter()
                             .filter(|(_, tunnel)| tunnel.group_id.as_ref() == Some(&group))
                             .map(|(id, _)| id.clone()).collect();
-                        for id in ids { self.stop(&id).await; }
+                        self.stop_many(ids).await;
                     }
                     Some(CoreCommand::StartTunnel(id)) => self.start(&id).await,
                     Some(CoreCommand::StopTunnel(id)) => self.stop(&id).await,
@@ -562,9 +562,7 @@ impl TunnelManager {
             })
             .cloned()
             .collect();
-        for id in &needs_restart {
-            self.stop(id).await;
-        }
+        self.stop_many(needs_restart).await;
         self.hosts = config.hosts;
         self.groups = config.groups;
         self.tunnels = updated;
@@ -782,15 +780,28 @@ impl TunnelManager {
     }
 
     async fn stop(&mut self, id: &TunnelId) {
-        self.desired_running.remove(id);
-        if let Some(mut active) = self.active.remove(id) {
-            active.cancellation.cancel();
-            if timeout(STOP_DEADLINE, &mut active.task).await.is_err() {
-                active.task.abort();
-                let _ = active.task.await;
+        self.stop_many(vec![id.clone()]).await;
+    }
+
+    async fn stop_many(&mut self, ids: Vec<TunnelId>) {
+        let deadline = Instant::now() + STOP_DEADLINE;
+        let mut tasks = Vec::with_capacity(ids.len());
+        for id in ids {
+            self.desired_running.remove(&id);
+            if let Some(active) = self.active.remove(&id) {
+                active.cancellation.cancel();
+                tasks.push((id, active.task));
+            } else {
+                self.set_state(&id, SupervisorState::Stopped, None);
             }
         }
-        self.set_state(id, SupervisorState::Stopped, None);
+        for (id, mut task) in tasks {
+            if timeout_at(deadline, &mut task).await.is_err() {
+                task.abort();
+                let _ = task.await;
+            }
+            self.set_state(&id, SupervisorState::Stopped, None);
+        }
     }
 
     async fn refresh(&mut self) {
@@ -1454,6 +1465,53 @@ mod config_tests {
         answer.await.expect("save reply").expect("save completes");
         handle.shutdown();
         task.await.expect("manager shutdown");
+    }
+
+    #[tokio::test]
+    async fn stop_all_cancels_every_owner_before_waiting_on_cleanup() {
+        let tunnels: Vec<_> = (0..3)
+            .map(|index| {
+                let mut tunnel = test_tunnel("127.0.0.1", 10000 + index);
+                tunnel.id = TunnelId(format!("tunnel-{index}"));
+                tunnel
+            })
+            .collect();
+        let ids: Vec<_> = tunnels.iter().map(|tunnel| tunnel.id.clone()).collect();
+        let (mut manager, _) = TunnelManager::new(
+            vec![test_host()],
+            Vec::new(),
+            tunnels,
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        let mut cancellations = Vec::new();
+        for id in &ids {
+            let cancellation = CancellationToken::new();
+            let task_cancel = cancellation.clone();
+            let task = tokio::spawn(async move {
+                task_cancel.cancelled().await;
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                None
+            });
+            let (_state_tx, state) = watch::channel(SupervisorState::Connecting { attempt: 1 });
+            manager.active.insert(
+                id.clone(),
+                ActiveTunnel {
+                    cancellation: cancellation.clone(),
+                    task,
+                    state,
+                    retry_hint: Arc::new(Notify::new()),
+                },
+            );
+            cancellations.push(cancellation);
+        }
+        let stop_task = tokio::spawn(async move { manager.stop_many(ids).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(cancellations.iter().all(CancellationToken::is_cancelled));
+        tokio::time::timeout(Duration::from_secs(2), stop_task)
+            .await
+            .expect("shared cleanup wait")
+            .expect("stop task");
     }
 
     #[tokio::test]
