@@ -405,6 +405,7 @@ impl DirectSshSession {
                 }
             }
         };
+        configure_first_hop_socket(&stream)?;
         Self::finish_connection(
             host,
             credentials,
@@ -877,6 +878,10 @@ async fn load_private_key(
     Ok(Arc::new(key))
 }
 
+fn configure_first_hop_socket(stream: &TcpStream) -> Result<(), SshConnectError> {
+    stream.set_nodelay(true).map_err(SshConnectError::Tcp)
+}
+
 fn validate(
     host: &SshHost,
     credentials: &SshCredential,
@@ -904,4 +909,23 @@ fn validate(
         return Err(SshConnectError::InvalidConfig("too many known_hosts files"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod socket_tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn first_hop_tcp_nodelay_is_set_on_the_socket() {
+        let listener = TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("local test listener");
+        let stream = TcpStream::connect(listener.local_addr().expect("listener address"))
+            .await
+            .expect("local client");
+        let (_accepted, _) = listener.accept().await.expect("accepted client");
+        configure_first_hop_socket(&stream).expect("set TCP_NODELAY");
+        assert!(stream.nodelay().expect("read TCP_NODELAY"));
+    }
 }
