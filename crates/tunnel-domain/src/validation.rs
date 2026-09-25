@@ -32,9 +32,29 @@ pub enum TunnelValidationError {
     UnexpectedRemoteEndpoint,
     #[error("reconnect policy is invalid")]
     InvalidReconnectPolicy,
+    #[error("non-loopback listener requires explicit exposure approval")]
+    ExposureApprovalRequired,
 }
 
 impl TunnelConfig {
+    /// Checks consent immediately before starting, after structural validation.
+    /// Remote forwarding describes the requested server bind address; server
+    /// policy may choose a different effective address.
+    pub fn validate_exposure(&self) -> Result<(), TunnelValidationError> {
+        let requested_host = match self.mode {
+            TunnelMode::Local | TunnelMode::Dynamic => Some(self.local.host.as_str()),
+            TunnelMode::Remote => self.remote.as_ref().map(|remote| remote.host.as_str()),
+        };
+        if requested_host
+            .and_then(|host| host.parse::<IpAddr>().ok())
+            .is_some_and(|address| !address.is_loopback())
+            && !self.exposure_approved
+        {
+            return Err(TunnelValidationError::ExposureApprovalRequired);
+        }
+        Ok(())
+    }
+
     /// Validates only settings needed to start one tunnel. It does not load
     /// credentials or make network calls. Runtime validation still checks port
     /// availability and SSH host-key trust.
@@ -151,6 +171,7 @@ mod tests {
             },
             remote: None,
             auto_start: false,
+            exposure_approved: false,
             reconnect: RetryPolicy::default(),
             description: String::new(),
         }
@@ -203,5 +224,37 @@ mod tests {
             port: 0,
         });
         assert!(config.validate(&[host()], &[]).is_ok());
+    }
+
+    #[test]
+    fn non_loopback_listeners_require_explicit_consent() {
+        for (address, exposed) in [
+            ("127.0.0.1", false),
+            ("127.0.0.2", false),
+            ("192.168.1.10", true),
+            ("0.0.0.0", true),
+            ("::1", false),
+            ("::", true),
+            ("2001:db8::1", true),
+        ] {
+            let mut config = tunnel(TunnelMode::Dynamic);
+            config.local.host = address.into();
+            assert_eq!(
+                config.validate_exposure().is_err(),
+                exposed,
+                "address {address}"
+            );
+            config.exposure_approved = true;
+            assert!(config.validate_exposure().is_ok());
+        }
+        let mut remote = tunnel(TunnelMode::Remote);
+        remote.remote = Some(RemoteEndpoint {
+            host: "::".into(),
+            port: 0,
+        });
+        assert_eq!(
+            remote.validate_exposure(),
+            Err(TunnelValidationError::ExposureApprovalRequired)
+        );
     }
 }

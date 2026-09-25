@@ -598,7 +598,10 @@ impl TunnelManager {
         let Some(tunnel) = self.tunnels.get(id).cloned() else {
             return;
         };
-        if let Err(error) = tunnel.validate(&self.hosts, &self.groups) {
+        if let Err(error) = tunnel
+            .validate(&self.hosts, &self.groups)
+            .and_then(|()| tunnel.validate_exposure())
+        {
             self.set_state(
                 id,
                 SupervisorState::Blocked {
@@ -981,6 +984,7 @@ fn same_tunnel_runtime(old: &TunnelConfig, new: &TunnelConfig) -> bool {
         && old.jump_chain == new.jump_chain
         && old.local == new.local
         && old.remote == new.remote
+        && old.exposure_approved == new.exposure_approved
         && old.reconnect == new.reconnect
 }
 
@@ -1045,6 +1049,7 @@ mod config_tests {
             },
             remote: None,
             auto_start: true,
+            exposure_approved: false,
             reconnect: RetryPolicy::default(),
             description: String::new(),
         }
@@ -1111,6 +1116,48 @@ mod config_tests {
         manager.stop(&tunnel.id).await;
         std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
             .expect("IPv6 listener released");
+    }
+
+    #[tokio::test]
+    async fn non_loopback_socks_does_not_bind_without_approval() {
+        let reserve = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let port = reserve.local_addr().expect("reserved address").port();
+        drop(reserve);
+        let tunnel = test_tunnel("0.0.0.0", port);
+        let (mut manager, _) = TunnelManager::new(
+            vec![test_host()],
+            Vec::new(),
+            vec![tunnel.clone()],
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        manager.start(&tunnel.id).await;
+        assert!(!manager.active.contains_key(&tunnel.id));
+        assert!(matches!(
+            manager.current[&tunnel.id].state,
+            SupervisorState::Blocked { .. }
+        ));
+        std::net::TcpListener::bind(("0.0.0.0", port)).expect("unapproved listener not bound");
+        let mut approved = tunnel.clone();
+        approved.exposure_approved = true;
+        manager.tunnels.insert(tunnel.id.clone(), approved);
+        manager.start(&tunnel.id).await;
+        assert!(manager.active.contains_key(&tunnel.id));
+        manager
+            .replace_config(DomainConfig {
+                app: AppSettings::default(),
+                hosts: vec![test_host()],
+                groups: Vec::new(),
+                tunnels: vec![tunnel.clone()],
+            })
+            .await;
+        assert!(!manager.active.contains_key(&tunnel.id));
+        assert!(matches!(
+            manager.current[&tunnel.id].state,
+            SupervisorState::Blocked { .. }
+        ));
+        std::net::TcpListener::bind(("0.0.0.0", port)).expect("revoked listener released");
+        manager.stop(&tunnel.id).await;
     }
 
     #[tokio::test]
@@ -1228,6 +1275,7 @@ mod config_tests {
             },
             remote: None,
             auto_start: false,
+            exposure_approved: false,
             reconnect: RetryPolicy::default(),
             description: String::new(),
         };

@@ -58,6 +58,8 @@ pub struct TunnelConfig {
     pub local: LocalEndpoint,
     pub remote: Option<RemoteEndpoint>,
     pub auto_start: bool,
+    /// Explicit consent to bind a non-loopback listener for this tunnel.
+    pub exposure_approved: bool,
     pub reconnect: RetryPolicy,
     pub description: String,
 }

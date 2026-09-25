@@ -84,7 +84,11 @@ impl ConfigStore {
 
     pub fn import_file(path: &Path) -> Result<DomainConfig, ConfigStoreError> {
         let file = File::open(path).map_err(|source| io_error(path.to_path_buf(), source))?;
-        Self::read_file(path.to_path_buf(), file)
+        let mut config = Self::read_file(path.to_path_buf(), file)?;
+        for tunnel in &mut config.tunnels {
+            tunnel.exposure_approved = false;
+        }
+        Ok(config)
     }
 
     fn read_file(path: PathBuf, file: File) -> Result<DomainConfig, ConfigStoreError> {
@@ -394,6 +398,7 @@ jump_chain = ["lab"]
 local_host = "127.0.0.1"
 local_port = 1080
 auto_start = true
+exposure_approved = true
 description = "Primary SOCKS5 proxy"
 "#,
         )
@@ -407,6 +412,10 @@ description = "Primary SOCKS5 proxy"
             AuthConfig::PrivateKey { .. }
         ));
         assert_eq!(loaded.tunnels[0].mode, TunnelMode::Dynamic);
+        assert!(loaded.tunnels[0].exposure_approved);
+        let imported = ConfigStore::import_file(&directory.path().join("config.toml"))
+            .expect("import external config");
+        assert!(!imported.tunnels[0].exposure_approved);
         assert!(loaded.app.run_at_startup);
         let document = ConfigDocument::try_from(loaded).expect("runtime to file model");
         ConfigStore::new(directory.path().to_path_buf())

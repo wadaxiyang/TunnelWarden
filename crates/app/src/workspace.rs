@@ -1651,14 +1651,41 @@ impl Workspace {
                             &editor.remote_port,
                         ));
                 }
-                if editor.mode == TunnelMode::Dynamic
-                    && editor.local_host.read(cx).value().as_ref() == "0.0.0.0"
-                {
-                    form = form.child(
-                        div()
-                            .text_color(cx.theme().danger)
-                            .child("This exposes the proxy to other devices on the network."),
-                    );
+                if let Some(scope) = editor.exposure_scope(cx) {
+                    let approved = editor.exposure_approved_for == Some(scope);
+                    let warning = match editor.mode {
+                        TunnelMode::Dynamic => {
+                            "Other devices may use this SOCKS5 proxy without authentication."
+                        }
+                        TunnelMode::Local => {
+                            "Other devices may access the forwarded service through this listener."
+                        }
+                        TunnelMode::Remote => {
+                            "This requests a remote listener reachable beyond the server's loopback interface. The server decides the effective binding."
+                        }
+                    };
+                    form = form
+                        .child(div().text_color(cx.theme().danger).child(warning))
+                        .child(
+                            Button::new("approve-exposure")
+                                .label(if approved {
+                                    "Network exposure approved"
+                                } else {
+                                    "Approve network exposure"
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    if let Some(Editor::Tunnel(editor)) = &mut this.editor {
+                                        let scope = editor.exposure_scope(cx);
+                                        editor.exposure_approved_for =
+                                            if editor.exposure_approved_for == scope {
+                                                None
+                                            } else {
+                                                scope
+                                            };
+                                        cx.notify();
+                                    }
+                                })),
+                        );
                 }
                 form = form.child(
                     div()
@@ -2439,6 +2466,7 @@ mod ui_tests {
             },
             remote: None,
             auto_start: false,
+            exposure_approved: false,
             reconnect: RetryPolicy::default(),
             description: String::new(),
         });

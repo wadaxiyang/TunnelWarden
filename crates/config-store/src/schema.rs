@@ -107,6 +107,8 @@ pub struct TunnelRecord {
     pub remote_port: Option<u16>,
     #[serde(default)]
     pub auto_start: bool,
+    #[serde(default)]
+    pub exposure_approved: bool,
     #[serde(default = "default_reconnect_base_ms")]
     pub reconnect_base_ms: u64,
     #[serde(default = "default_reconnect_max_ms")]
@@ -323,6 +325,7 @@ impl TunnelRecord {
             },
             remote,
             auto_start: self.auto_start,
+            exposure_approved: self.exposure_approved,
             reconnect: RetryPolicy {
                 base_delay: Duration::from_millis(self.reconnect_base_ms),
                 max_delay: Duration::from_millis(self.reconnect_max_ms),
@@ -467,6 +470,7 @@ impl TryFrom<TunnelConfig> for TunnelRecord {
             remote_host,
             remote_port,
             auto_start: tunnel.auto_start,
+            exposure_approved: tunnel.exposure_approved,
             reconnect_base_ms: milliseconds(tunnel.reconnect.base_delay)?,
             reconnect_max_ms: milliseconds(tunnel.reconnect.max_delay)?,
             reconnect_reset_ms: milliseconds(tunnel.reconnect.reset_after_healthy)?,

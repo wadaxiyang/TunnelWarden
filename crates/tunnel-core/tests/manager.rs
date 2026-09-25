@@ -51,6 +51,7 @@ async fn stop_during_reconnect_releases_the_owned_listener() {
         },
         remote: None,
         auto_start: false,
+        exposure_approved: false,
         reconnect: RetryPolicy {
             base_delay: Duration::from_secs(10),
             max_delay: Duration::from_secs(30),

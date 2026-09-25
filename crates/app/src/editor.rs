@@ -1,4 +1,4 @@
-use std::{path::PathBuf, time::Duration};
+use std::{net::IpAddr, path::PathBuf, time::Duration};
 
 use gpui_kit::component::input::InputState;
 use gpui_kit::{AppContext as _, Context, Entity, Window};
@@ -223,6 +223,7 @@ pub struct TunnelEditor {
     pub mode: TunnelMode,
     pub jump_chain: Vec<HostId>,
     pub auto_start: bool,
+    pub exposure_approved_for: Option<(TunnelMode, IpAddr)>,
     pub reconnect: RetryPolicy,
     pub group_id: Option<GroupId>,
 }
@@ -275,6 +276,16 @@ impl TunnelEditor {
             mode: existing.map_or(TunnelMode::Dynamic, |tunnel| tunnel.mode),
             jump_chain: existing.map_or_else(Vec::new, |tunnel| tunnel.jump_chain.clone()),
             auto_start: existing.is_some_and(|tunnel| tunnel.auto_start),
+            exposure_approved_for: existing.and_then(|tunnel| {
+                if !tunnel.exposure_approved {
+                    return None;
+                }
+                let host = match tunnel.mode {
+                    TunnelMode::Local | TunnelMode::Dynamic => &tunnel.local.host,
+                    TunnelMode::Remote => &tunnel.remote.as_ref()?.host,
+                };
+                host.parse().ok().map(|address| (tunnel.mode, address))
+            }),
             reconnect: existing
                 .map_or_else(RetryPolicy::default, |tunnel| tunnel.reconnect.clone()),
             group_id: existing.and_then(|tunnel| tunnel.group_id.clone()),
@@ -310,6 +321,9 @@ impl TunnelEditor {
                     .map_err(|_| "Destination port must be between 1 and 65535")?,
             })
         };
+        let exposure_approved = self
+            .exposure_scope(cx)
+            .is_some_and(|scope| self.exposure_approved_for == Some(scope));
         Ok(TunnelConfig {
             id: self.id.clone(),
             name: self.name.read(cx).value().to_string().trim().to_owned(),
@@ -328,9 +342,27 @@ impl TunnelEditor {
             },
             remote,
             auto_start: self.auto_start,
+            exposure_approved,
             reconnect: self.reconnect.clone(),
             description: self.description.read(cx).value().to_string(),
         })
+    }
+
+    pub fn exposure_scope(
+        &self,
+        cx: &Context<crate::workspace::Workspace>,
+    ) -> Option<(TunnelMode, IpAddr)> {
+        let state = match self.mode {
+            TunnelMode::Local | TunnelMode::Dynamic => &self.local_host,
+            TunnelMode::Remote => &self.remote_host,
+        };
+        state
+            .read(cx)
+            .value()
+            .parse::<IpAddr>()
+            .ok()
+            .filter(|address| !address.is_loopback())
+            .map(|address| (self.mode, address))
     }
 }
 
