@@ -425,7 +425,7 @@ impl Workspace {
                 sort_order: order,
             });
         }
-        self.persist_config(directory.clone(), config, None, cx);
+        self.persist_config(directory.clone(), config, None, false, cx);
     }
 
     fn delete_group(&mut self, id: &GroupId, cx: &mut Context<Self>) {
@@ -439,7 +439,7 @@ impl Workspace {
                 tunnel.group_id = None;
             }
         }
-        self.persist_config(directory.clone(), config, None, cx);
+        self.persist_config(directory.clone(), config, None, false, cx);
     }
 
     fn move_group(&mut self, id: &GroupId, direction: isize, cx: &mut Context<Self>) {
@@ -459,7 +459,7 @@ impl Workspace {
         for (order, group) in config.groups.iter_mut().enumerate() {
             group.sort_order = order as u32;
         }
-        self.persist_config(directory.clone(), config, None, cx);
+        self.persist_config(directory.clone(), config, None, false, cx);
     }
 
     fn save_editor(&mut self, cx: &mut Context<Self>) {
@@ -504,7 +504,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.persist_config(directory, config, secret, cx);
+        self.persist_config(directory, config, secret, false, cx);
     }
 
     fn persist_config(
@@ -512,6 +512,7 @@ impl Workspace {
         directory: PathBuf,
         config: DomainConfig,
         secret: Option<SecretUpdate>,
+        stop_running_on_commit: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(manager) = &self.manager else {
@@ -524,6 +525,7 @@ impl Workspace {
             directory: directory.clone(),
             config,
             secret,
+            stop_running_on_commit,
             reply,
         }) {
             self.command_error = Some(error.to_string());
@@ -596,7 +598,7 @@ impl Workspace {
                 view.file_busy = false;
                 match result {
                     Ok(Some(config)) => {
-                        view.file_message = Some(format!("Import preview: {} jumpers, {} tunnels. Existing configuration will be replaced after confirmation.", config.hosts.len(), config.tunnels.len()));
+                        view.file_message = Some(format!("Import preview: {} jumpers, {} tunnels. Import disables tunnel auto start, retains this app's current login startup setting, resets host-key trust to Strict, and removes network exposure approvals. Credential references and key paths remain; inspect them before manually starting a tunnel. Running tunnels stop when this import is saved.", config.hosts.len(), config.tunnels.len()));
                         view.import_preview = Some(config);
                     }
                     Ok(None) => {},
@@ -612,13 +614,14 @@ impl Workspace {
         if self.saving {
             return;
         }
-        let Some(config) = self.import_preview.clone() else {
+        let Some(mut config) = self.import_preview.clone() else {
             return;
         };
-        let Ok((directory, _)) = &self.startup else {
+        let Ok((directory, current)) = &self.startup else {
             return;
         };
-        self.persist_config(directory.clone(), config, None, cx);
+        config.app.run_at_startup = current.app.run_at_startup;
+        self.persist_config(directory.clone(), config, None, true, cx);
     }
 
     fn choose_ssh_import(&mut self, cx: &mut Context<Self>) {
@@ -724,7 +727,7 @@ impl Workspace {
             cx.notify();
             return;
         }
-        self.persist_config(directory.clone(), config, None, cx);
+        self.persist_config(directory.clone(), config, None, false, cx);
     }
 
     fn choose_export(&mut self, cx: &mut Context<Self>) {
@@ -1252,7 +1255,7 @@ impl Workspace {
                         };
                         let mut config = current.clone();
                         config.app.run_at_startup = !config.app.run_at_startup;
-                        this.persist_config(directory.clone(), config, None, cx);
+                        this.persist_config(directory.clone(), config, None, false, cx);
                     })),
             )
             .child(
@@ -1269,7 +1272,7 @@ impl Workspace {
                         };
                         let mut config = current.clone();
                         config.app.minimize_to_tray = !config.app.minimize_to_tray;
-                        this.persist_config(directory.clone(), config, None, cx);
+                        this.persist_config(directory.clone(), config, None, false, cx);
                     })),
             )
             .child(

@@ -85,7 +85,12 @@ impl ConfigStore {
     pub fn import_file(path: &Path) -> Result<DomainConfig, ConfigStoreError> {
         let file = File::open(path).map_err(|source| io_error(path.to_path_buf(), source))?;
         let mut config = Self::read_file(path.to_path_buf(), file)?;
+        config.app.run_at_startup = false;
+        for host in &mut config.hosts {
+            host.host_key_policy = tunnel_domain::HostKeyPolicy::Strict;
+        }
         for tunnel in &mut config.tunnels {
+            tunnel.auto_start = false;
             tunnel.exposure_approved = false;
         }
         Ok(config)
@@ -381,6 +386,7 @@ port = 22
 username = "user"
 auth_type = "private_key"
 identity_file = "~/.ssh/id_ed25519"
+host_key_policy = "bypass"
 connect_timeout_ms = 8000
 keepalive_interval_ms = 10000
 keepalive_max = 3
@@ -412,10 +418,20 @@ description = "Primary SOCKS5 proxy"
             AuthConfig::PrivateKey { .. }
         ));
         assert_eq!(loaded.tunnels[0].mode, TunnelMode::Dynamic);
+        assert_eq!(
+            loaded.hosts[0].host_key_policy,
+            tunnel_domain::HostKeyPolicy::Bypass
+        );
         assert!(loaded.tunnels[0].exposure_approved);
         let imported = ConfigStore::import_file(&directory.path().join("config.toml"))
             .expect("import external config");
         assert!(!imported.tunnels[0].exposure_approved);
+        assert!(!imported.tunnels[0].auto_start);
+        assert!(!imported.app.run_at_startup);
+        assert_eq!(
+            imported.hosts[0].host_key_policy,
+            tunnel_domain::HostKeyPolicy::Strict
+        );
         assert!(loaded.app.run_at_startup);
         let document = ConfigDocument::try_from(loaded).expect("runtime to file model");
         ConfigStore::new(directory.path().to_path_buf())

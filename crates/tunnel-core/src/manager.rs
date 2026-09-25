@@ -100,6 +100,7 @@ pub enum CoreCommand {
         directory: PathBuf,
         config: DomainConfig,
         secret: Option<SecretUpdate>,
+        stop_running_on_commit: bool,
         reply: oneshot::Sender<Result<SaveReceipt, String>>,
     },
     ImportConfig {
@@ -194,6 +195,7 @@ struct PendingHostKey {
 
 struct PendingSave {
     config: DomainConfig,
+    stop_running_on_commit: bool,
     reply: oneshot::Sender<Result<SaveReceipt, String>>,
 }
 
@@ -371,7 +373,7 @@ impl TunnelManager {
                             }
                         }
                     }
-                    Some(CoreCommand::SaveConfig { directory, config, secret, reply }) => {
+                    Some(CoreCommand::SaveConfig { directory, config, secret, stop_running_on_commit, reply }) => {
                         if self.pending_save.is_some() {
                             let _ = reply.send(Err("Another configuration save is in progress".into()));
                             continue;
@@ -383,7 +385,7 @@ impl TunnelManager {
                                 self.save_tasks.spawn_blocking(move || {
                                     Self::persist_config_blocking(directory, to_write, secret, old_run_at_login)
                                 });
-                                self.pending_save = Some(PendingSave { config, reply });
+                                self.pending_save = Some(PendingSave { config, stop_running_on_commit, reply });
                             }
                             Err(error) => { let _ = reply.send(Err(error.to_string())); }
                         }
@@ -416,7 +418,7 @@ impl TunnelManager {
                     if let Some(pending) = self.pending_save.take() {
                         match completed {
                             Some(Ok(Ok(outcome))) => {
-                                self.replace_config(pending.config.clone()).await;
+                                self.replace_config(pending.config.clone(), pending.stop_running_on_commit).await;
                                 let _ = pending.reply.send(Ok(SaveReceipt {
                                     canonical_config: pending.config,
                                     warnings: outcome.warnings,
@@ -535,7 +537,11 @@ impl TunnelManager {
         }
     }
 
-    async fn replace_config(&mut self, config: DomainConfig) {
+    async fn replace_config(&mut self, config: DomainConfig, stop_running: bool) {
+        if stop_running {
+            self.stop_many(self.active.keys().cloned().collect()).await;
+            self.desired_running.clear();
+        }
         self.config_views.send_replace(Arc::new(config.clone()));
         let old_running = self.desired_running.clone();
         let updated: HashMap<TunnelId, TunnelConfig> = config
@@ -1074,12 +1080,15 @@ mod config_tests {
         let mut edited = tunnel.clone();
         edited.description = "unrelated note".into();
         manager
-            .replace_config(DomainConfig {
-                app: AppSettings::default(),
-                hosts: vec![test_host()],
-                groups: Vec::new(),
-                tunnels: vec![edited],
-            })
+            .replace_config(
+                DomainConfig {
+                    app: AppSettings::default(),
+                    hosts: vec![test_host()],
+                    groups: Vec::new(),
+                    tunnels: vec![edited],
+                },
+                false,
+            )
             .await;
         assert!(!manager.desired_running.contains(&tunnel.id));
         assert!(!manager.active.contains_key(&tunnel.id));
@@ -1144,12 +1153,15 @@ mod config_tests {
         manager.start(&tunnel.id).await;
         assert!(manager.active.contains_key(&tunnel.id));
         manager
-            .replace_config(DomainConfig {
-                app: AppSettings::default(),
-                hosts: vec![test_host()],
-                groups: Vec::new(),
-                tunnels: vec![tunnel.clone()],
-            })
+            .replace_config(
+                DomainConfig {
+                    app: AppSettings::default(),
+                    hosts: vec![test_host()],
+                    groups: Vec::new(),
+                    tunnels: vec![tunnel.clone()],
+                },
+                false,
+            )
             .await;
         assert!(!manager.active.contains_key(&tunnel.id));
         assert!(matches!(
@@ -1158,6 +1170,39 @@ mod config_tests {
         ));
         std::net::TcpListener::bind(("0.0.0.0", port)).expect("revoked listener released");
         manager.stop(&tunnel.id).await;
+    }
+
+    #[tokio::test]
+    async fn imported_config_stops_matching_running_tunnel() {
+        let reserve = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let port = reserve.local_addr().expect("reserved address").port();
+        drop(reserve);
+        let tunnel = test_tunnel("127.0.0.1", port);
+        let (mut manager, _) = TunnelManager::new(
+            vec![test_host()],
+            Vec::new(),
+            vec![tunnel.clone()],
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        manager.start(&tunnel.id).await;
+        assert!(manager.active.contains_key(&tunnel.id));
+        let mut imported = tunnel.clone();
+        imported.auto_start = false;
+        manager
+            .replace_config(
+                DomainConfig {
+                    app: AppSettings::default(),
+                    hosts: vec![test_host()],
+                    groups: Vec::new(),
+                    tunnels: vec![imported],
+                },
+                true,
+            )
+            .await;
+        assert!(!manager.active.contains_key(&tunnel.id));
+        assert!(!manager.desired_running.contains(&tunnel.id));
+        std::net::TcpListener::bind(("127.0.0.1", port)).expect("import released listener");
     }
 
     #[tokio::test]
@@ -1316,6 +1361,7 @@ mod config_tests {
                         tunnels: Vec::new()
                     },
                     secret: None,
+                    stop_running_on_commit: false,
                     reply,
                 })
                 .is_ok()
@@ -1359,6 +1405,7 @@ mod config_tests {
                     tunnels: Vec::new(),
                 },
                 secret: None,
+                stop_running_on_commit: false,
                 reply,
             })
             .expect("queue save");
@@ -1421,6 +1468,7 @@ mod config_tests {
                     tunnels: Vec::new(),
                 },
                 secret: None,
+                stop_running_on_commit: false,
                 reply,
             })
             .expect("queue save");
@@ -1484,6 +1532,7 @@ mod config_tests {
                     tunnels: vec![tunnel.clone()],
                 },
                 secret: None,
+                stop_running_on_commit: false,
                 reply,
             })
             .expect("queue save");
