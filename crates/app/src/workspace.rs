@@ -20,7 +20,8 @@ use gpui_kit::{
 use tokio::sync::oneshot;
 use tunnel_core::{
     CoreCommand, HostKeyDecision, HostKeyPromptView, LogEvent, LogLevel, LogSnapshot, LogSource,
-    ManagerHandle, ManagerSnapshot, SecretUpdate, SupervisorState, TunnelAction, actions_for,
+    ManagerHandle, ManagerSnapshot, SaveReceipt, SecretUpdate, SupervisorState, TunnelAction,
+    actions_for,
 };
 use tunnel_domain::TunnelMode;
 use tunnel_domain::{AuthConfig, GroupId, HostId, HostKeyPolicy, SecretRef, TunnelGroup, TunnelId};
@@ -112,6 +113,7 @@ pub struct Workspace {
     log_search: Entity<InputState>,
     _log_search_subscription: Subscription,
     editor: Option<Editor>,
+    context_session: u64,
     group_editor: Option<GroupEditor>,
     pending_group_delete: Option<GroupId>,
     saving: bool,
@@ -125,6 +127,33 @@ pub struct Workspace {
 }
 
 impl Workspace {
+    fn advance_context(&mut self) {
+        self.context_session = self.context_session.wrapping_add(1).max(1);
+    }
+
+    fn apply_save_receipt(
+        &mut self,
+        directory: PathBuf,
+        receipt: SaveReceipt,
+        submitted_context: u64,
+    ) {
+        self.startup = Ok((directory, receipt.canonical_config));
+        if self.context_session == submitted_context {
+            self.editor = None;
+            self.group_editor = None;
+            self.pending_group_delete = None;
+            self.import_preview = None;
+            self.ssh_preview = None;
+        }
+        self.command_error = None;
+        self.save_warning = (!receipt.warnings.is_empty()).then(|| {
+            format!(
+                "Configuration saved with maintenance warnings: {}",
+                receipt.warnings.join("; ")
+            )
+        });
+    }
+
     pub fn new(
         startup: Result<(PathBuf, DomainConfig), String>,
         manager: Option<ManagerHandle>,
@@ -223,6 +252,7 @@ impl Workspace {
             log_search,
             _log_search_subscription: log_search_subscription,
             editor: None,
+            context_session: 1,
             group_editor: None,
             pending_group_delete: None,
             saving: false,
@@ -251,6 +281,7 @@ impl Workspace {
         self.editor = Some(Editor::Host(Box::new(HostEditor::new(
             id, None, window, cx,
         ))));
+        self.advance_context();
         cx.notify();
     }
 
@@ -269,6 +300,7 @@ impl Workspace {
             window,
             cx,
         ))));
+        self.advance_context();
         cx.notify();
     }
 
@@ -287,6 +319,7 @@ impl Workspace {
         self.editor = Some(Editor::Tunnel(Box::new(TunnelEditor::new(
             id, None, window, cx,
         ))));
+        self.advance_context();
         cx.notify();
     }
 
@@ -305,6 +338,7 @@ impl Workspace {
             window,
             cx,
         ))));
+        self.advance_context();
         cx.notify();
     }
 
@@ -324,6 +358,7 @@ impl Workspace {
             id,
             name: cx.new(|cx| InputState::new(window, cx)),
         });
+        self.advance_context();
         cx.notify();
     }
 
@@ -340,6 +375,7 @@ impl Workspace {
             id: id.clone(),
             name: cx.new(|cx| InputState::new(window, cx).default_value(&group.name)),
         });
+        self.advance_context();
         cx.notify();
     }
 
@@ -490,6 +526,7 @@ impl Workspace {
         self.saving = true;
         self.command_error = None;
         self.save_warning = None;
+        let submitted_context = self.context_session;
         self._save_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let result = answer
                 .await
@@ -497,21 +534,7 @@ impl Workspace {
             let _ = this.update(cx, |view, cx| {
                 view.saving = false;
                 match result {
-                    Ok(receipt) => {
-                        view.startup = Ok((directory, receipt.canonical_config));
-                        view.editor = None;
-                        view.group_editor = None;
-                        view.pending_group_delete = None;
-                        view.import_preview = None;
-                        view.ssh_preview = None;
-                        view.command_error = None;
-                        view.save_warning = (!receipt.warnings.is_empty()).then(|| {
-                            format!(
-                                "Configuration saved with maintenance warnings: {}",
-                                receipt.warnings.join("; ")
-                            )
-                        });
-                    }
+                    Ok(receipt) => view.apply_save_receipt(directory, receipt, submitted_context),
                     Err(error) => view.command_error = Some(error),
                 }
                 cx.notify();
@@ -751,6 +774,7 @@ impl Workspace {
     }
 
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        self.advance_context();
         self.page = page;
         self.page_index = 0;
         self.editor = None;
@@ -2132,6 +2156,58 @@ mod ui_tests {
             assert!(window.find("new-group").visible());
         })
         .expect("workspace window");
+    }
+
+    #[gpui_kit::test]
+    fn stale_save_receipt_keeps_later_editor_and_its_draft(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let config = ConfigDocument::default()
+            .into_domain()
+            .expect("default config");
+        let handle = cx.add_window(move |window, cx| {
+            Workspace::new(Ok((PathBuf::new(), config)), None, None, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("Tunnels", cx);
+            window.click("new-tunnel", cx);
+        })
+        .expect("first editor");
+        let mut submitted_context = 0;
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, _| submitted_context = view.context_session)
+                .expect("capture edit session");
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("Jumpers", cx);
+            window.click("new-host", cx);
+            window.click("Name", cx);
+            window.input("Later draft", cx);
+        })
+        .expect("second editor");
+        let mut committed = ConfigDocument::default()
+            .into_domain()
+            .expect("committed config");
+        committed.app.theme = config_store::ThemePreference::Dark;
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, cx| {
+                    view.apply_save_receipt(
+                        PathBuf::new(),
+                        SaveReceipt {
+                            canonical_config: committed,
+                            warnings: Vec::new(),
+                        },
+                        submitted_context,
+                    );
+                    assert!(matches!(&view.editor, Some(Editor::Host(editor)) if editor.name.read(cx).value() == "Later draft"));
+                    assert_eq!(
+                        view.startup.as_ref().expect("saved config").1.app.theme,
+                        config_store::ThemePreference::Dark
+                    );
+                })
+                .expect("later editor survives");
+        });
     }
 
     #[gpui_kit::test]
