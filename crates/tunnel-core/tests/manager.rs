@@ -37,6 +37,7 @@ async fn stop_during_reconnect_releases_the_owned_listener() {
         connect_timeout: Duration::from_millis(200),
         keepalive_interval: Duration::from_secs(10),
         keepalive_max: 3,
+        inactivity_timeout: None,
         notes: String::new(),
     };
     let tunnel = TunnelConfig {

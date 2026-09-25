@@ -203,6 +203,7 @@ pub fn preview_ssh_config(path: &Path) -> Result<SshImportPreview, SshImportErro
             connect_timeout: Duration::from_secs(seconds("connecttimeout", 10).max(1)),
             keepalive_interval: Duration::from_secs(seconds("serveraliveinterval", 30).max(1)),
             keepalive_max: seconds("serveralivecountmax", 3).clamp(1, u32::MAX as u64) as u32,
+            inactivity_timeout: None,
             notes: String::new(),
         };
         if host.username.is_empty() {

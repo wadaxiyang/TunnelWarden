@@ -133,7 +133,7 @@ impl ConfigStore {
         Ok(())
     }
 
-    /// Writes a validated schema-v1 document through a synced temporary file.
+    /// Writes a validated schema-v2 document through a synced temporary file.
     /// Existing config is backed up before replacement. A failed rename leaves
     /// the original file untouched and removes the temporary file on drop.
     pub fn save(&self, document: ConfigDocument) -> Result<SaveOutcome, ConfigStoreError> {
@@ -587,18 +587,61 @@ description = "Primary SOCKS5 proxy"
         store.save(ConfigDocument::default()).expect("initial save");
         let before = fs::read(directory.path().join("config.toml")).expect("read initial");
         let invalid = ConfigDocument {
-            schema_version: 2,
+            schema_version: 3,
             ..ConfigDocument::default()
         };
         assert!(matches!(
             store.save(invalid),
             Err(ConfigStoreError::Validation(
-                ConfigValidationError::UnsupportedVersion(2)
+                ConfigValidationError::UnsupportedVersion(3)
             ))
         ));
         assert_eq!(
             fs::read(directory.path().join("config.toml")).expect("read preserved"),
             before
+        );
+    }
+
+    #[test]
+    fn v1_host_migrates_on_save_with_backup_and_v2_inactivity_roundtrip() {
+        let directory = TempDir::new().expect("temporary directory");
+        let path = directory.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"schema_version = 1
+
+[[hosts]]
+id = "lab"
+name = "Lab"
+hostname = "lab.example.test"
+username = "alice"
+auth_type = "agent"
+"#,
+        )
+        .expect("write v1 config");
+        let store = ConfigStore::new(directory.path().to_path_buf());
+        let mut loaded = store.load().expect("load v1");
+        assert_eq!(loaded.hosts[0].inactivity_timeout, None);
+        loaded.hosts[0].inactivity_timeout = Some(std::time::Duration::from_secs(30));
+        store
+            .save(ConfigDocument::try_from(loaded).expect("v2 document"))
+            .expect("save migration");
+        let saved = fs::read_to_string(&path).expect("read v2");
+        assert!(saved.contains("schema_version = 2"));
+        assert!(saved.contains("inactivity_timeout_ms = 30000"));
+        let backups = fs::read_dir(directory.path().join("backups"))
+            .expect("backup directory")
+            .map(|entry| entry.expect("backup entry").path())
+            .collect::<Vec<_>>();
+        assert_eq!(backups.len(), 1);
+        assert!(
+            fs::read_to_string(&backups[0])
+                .expect("v1 backup")
+                .contains("schema_version = 1")
+        );
+        assert_eq!(
+            store.load().expect("reload v2").hosts[0].inactivity_timeout,
+            Some(std::time::Duration::from_secs(30))
         );
     }
 

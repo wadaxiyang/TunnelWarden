@@ -1350,6 +1350,7 @@ fn same_host_connection(old: Option<&SshHost>, new: Option<&SshHost>) -> bool {
                 && old.connect_timeout == new.connect_timeout
                 && old.keepalive_interval == new.keepalive_interval
                 && old.keepalive_max == new.keepalive_max
+                && old.inactivity_timeout == new.inactivity_timeout
         }
         (None, None) => true,
         _ => false,
@@ -1383,6 +1384,7 @@ mod config_tests {
             connect_timeout: Duration::from_secs(1),
             keepalive_interval: Duration::from_secs(10),
             keepalive_max: 3,
+            inactivity_timeout: None,
             notes: String::new(),
         }
     }

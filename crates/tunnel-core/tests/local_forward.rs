@@ -122,6 +122,7 @@ async fn local_tcp_bytes_cross_ssh_and_stop_releases_port() {
         connect_timeout: Duration::from_secs(5),
         keepalive_interval: Duration::from_secs(10),
         keepalive_max: 3,
+        inactivity_timeout: None,
         notes: String::new(),
     };
     let root = CancellationToken::new();
@@ -218,6 +219,7 @@ async fn socks5_domain_is_forwarded_over_ssh_and_stop_releases_port() {
         connect_timeout: Duration::from_secs(5),
         keepalive_interval: Duration::from_secs(10),
         keepalive_max: 3,
+        inactivity_timeout: None,
         notes: String::new(),
     };
     let root = CancellationToken::new();

@@ -45,5 +45,7 @@ pub struct SshHost {
     pub connect_timeout: Duration,
     pub keepalive_interval: Duration,
     pub keepalive_max: u32,
+    /// Optional SSH transport inactivity timeout. None keeps an idle tunnel open.
+    pub inactivity_timeout: Option<Duration>,
     pub notes: String,
 }

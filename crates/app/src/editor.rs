@@ -23,6 +23,7 @@ pub struct HostEditor {
     pub connect_timeout_ms: Entity<InputState>,
     pub keepalive_interval_ms: Entity<InputState>,
     pub keepalive_max: Entity<InputState>,
+    pub inactivity_timeout_ms: Entity<InputState>,
     pub auth: AuthConfig,
     pub original_auth: AuthConfig,
     pub policy: HostKeyPolicy,
@@ -90,6 +91,13 @@ impl HostEditor {
             ),
             keepalive_max: text(
                 &existing.map_or(3, |host| host.keepalive_max).to_string(),
+                window,
+                cx,
+            ),
+            inactivity_timeout_ms: text(
+                &existing
+                    .and_then(|host| host.inactivity_timeout)
+                    .map_or(String::new(), |duration| duration.as_millis().to_string()),
                 window,
                 cx,
             ),
@@ -189,6 +197,19 @@ impl HostEditor {
             .value()
             .parse::<u32>()
             .map_err(|_| "Keepalive max must be a number")?;
+        let inactivity_raw = self.inactivity_timeout_ms.read(cx).value();
+        let inactivity_timeout = if inactivity_raw.trim().is_empty() {
+            None
+        } else {
+            let millis = inactivity_raw
+                .trim()
+                .parse::<u64>()
+                .map_err(|_| "SSH inactivity timeout must be milliseconds or blank")?;
+            if millis == 0 {
+                return Err("SSH inactivity timeout must be greater than zero".into());
+            }
+            Some(Duration::from_millis(millis))
+        };
         Ok((
             SshHost {
                 id: self.id.clone(),
@@ -201,6 +222,7 @@ impl HostEditor {
                 connect_timeout: Duration::from_millis(connect_timeout_ms),
                 keepalive_interval: Duration::from_millis(keepalive_interval_ms),
                 keepalive_max,
+                inactivity_timeout,
                 notes: self.notes.read(cx).value().to_string(),
             },
             secret_update,

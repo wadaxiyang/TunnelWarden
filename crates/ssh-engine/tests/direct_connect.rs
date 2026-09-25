@@ -207,6 +207,7 @@ impl TestServer {
             connect_timeout: Duration::from_secs(5),
             keepalive_interval: Duration::from_secs(10),
             keepalive_max: 3,
+            inactivity_timeout: None,
             notes: String::new(),
         }
     }
@@ -360,6 +361,7 @@ async fn handshake_timeout_closes_transport_after_russh_task_starts() {
         connect_timeout: Duration::from_millis(200),
         keepalive_interval: Duration::from_secs(10),
         keepalive_max: 3,
+        inactivity_timeout: None,
         notes: String::new(),
     };
     let cancellation = CancellationToken::new();
@@ -398,6 +400,51 @@ async fn matching_host_key_and_password_establish_real_ssh_and_ping() {
     assert!(session.ping(Duration::from_secs(5)).await.is_ok());
     let disconnected = session.disconnect().await;
     assert!(disconnected.is_ok(), "{disconnected:?}");
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn transport_inactivity_is_opt_in_and_ping_keeps_an_enabled_session_live() {
+    let server = TestServer::start().await;
+    let directory = TempDir::new().expect("directory");
+    let path = server.trust(directory.path(), &server.public_key);
+    let mut host = server.host();
+    host.keepalive_interval = Duration::ZERO;
+    let cancellation = CancellationToken::new();
+    let session = DirectSshSession::connect_password(
+        &host,
+        Zeroizing::new("secret".into()),
+        &[path],
+        &cancellation,
+    )
+    .await
+    .expect("default idle session");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(session.ping(Duration::from_secs(1)).await.is_ok());
+    session.disconnect().await.expect("disconnect");
+    server.stop().await;
+
+    let server = TestServer::start().await;
+    let directory = TempDir::new().expect("directory");
+    let path = server.trust(directory.path(), &server.public_key);
+    let mut host = server.host();
+    host.keepalive_interval = Duration::ZERO;
+    host.inactivity_timeout = Some(Duration::from_millis(250));
+    let session = DirectSshSession::connect_password(
+        &host,
+        Zeroizing::new("secret".into()),
+        &[path],
+        &cancellation,
+    )
+    .await
+    .expect("session with inactivity timeout");
+    for _ in 0..4 {
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(session.ping(Duration::from_secs(1)).await.is_ok());
+    }
+    assert!(!session.is_closed());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert!(session.is_closed());
     server.stop().await;
 }
 

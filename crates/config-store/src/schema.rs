@@ -7,11 +7,13 @@ use tunnel_domain::{
     SecretRef, SshHost, TunnelConfig, TunnelGroup, TunnelId, TunnelMode,
 };
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+const LEGACY_SCHEMA_VERSION: u32 = 1;
 const MAX_HOSTS: usize = 512;
 const MAX_GROUPS: usize = 128;
 const MAX_TUNNELS: usize = 1024;
 const MAX_JUMP_HOPS: usize = 16;
+const MAX_INACTIVITY_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -77,6 +79,8 @@ pub struct HostRecord {
     pub keepalive_interval_ms: u64,
     #[serde(default = "default_keepalive_max")]
     pub keepalive_max: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inactivity_timeout_ms: Option<u64>,
     #[serde(default)]
     pub notes: String,
 }
@@ -174,7 +178,27 @@ pub enum ConfigValidationError {
 impl ConfigDocument {
     /// Consumes the versioned file model and builds the runtime domain model.
     /// All counts are capped before allocating conversion collections.
-    pub fn into_domain(self) -> Result<DomainConfig, ConfigValidationError> {
+    pub fn into_domain(mut self) -> Result<DomainConfig, ConfigValidationError> {
+        if self.schema_version == LEGACY_SCHEMA_VERSION {
+            if self
+                .hosts
+                .iter()
+                .any(|host| host.inactivity_timeout_ms.is_some())
+            {
+                return Err(ConfigValidationError::Host {
+                    id: self
+                        .hosts
+                        .iter()
+                        .find(|host| host.inactivity_timeout_ms.is_some())
+                        .map_or("unknown", |host| host.id.as_str())
+                        .to_owned(),
+                    reason: "inactivity_timeout_ms requires schema version 2",
+                });
+            }
+            // v1 had no inactivity setting; migrate in memory. The store backs up
+            // the original file before the next save writes a v2 document.
+            self.schema_version = SCHEMA_VERSION;
+        }
         if self.schema_version != SCHEMA_VERSION {
             return Err(ConfigValidationError::UnsupportedVersion(
                 self.schema_version,
@@ -255,8 +279,15 @@ impl HostRecord {
             || self.port == 0
             || self.connect_timeout_ms == 0
             || self.keepalive_max == 0
+            || self.inactivity_timeout_ms == Some(0)
         {
             return Err(bad("required field is empty or zero"));
+        }
+        if self
+            .inactivity_timeout_ms
+            .is_some_and(|millis| millis > MAX_INACTIVITY_MS)
+        {
+            return Err(bad("SSH inactivity timeout exceeds 7 days"));
         }
         let auth = match self.auth_type {
             AuthType::Password => AuthConfig::Password {
@@ -290,6 +321,7 @@ impl HostRecord {
             connect_timeout: Duration::from_millis(self.connect_timeout_ms),
             keepalive_interval: Duration::from_millis(self.keepalive_interval_ms),
             keepalive_max: self.keepalive_max,
+            inactivity_timeout: self.inactivity_timeout_ms.map(Duration::from_millis),
             notes: self.notes,
         })
     }
@@ -446,6 +478,7 @@ impl TryFrom<SshHost> for HostRecord {
             connect_timeout_ms: milliseconds(host.connect_timeout)?,
             keepalive_interval_ms: milliseconds(host.keepalive_interval)?,
             keepalive_max: host.keepalive_max,
+            inactivity_timeout_ms: host.inactivity_timeout.map(milliseconds).transpose()?,
             notes: host.notes,
         })
     }

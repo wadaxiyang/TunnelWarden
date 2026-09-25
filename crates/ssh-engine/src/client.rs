@@ -519,6 +519,7 @@ impl DirectSshSession {
                 Some(host.keepalive_interval)
             },
             keepalive_max: host.keepalive_max as usize,
+            inactivity_timeout: host.inactivity_timeout,
             ..Default::default()
         });
         let (forwarded_sender, forwarded, remote_enabled) = if let Some(binding) = remote {
@@ -1024,6 +1025,13 @@ fn validate(
     }
     if host.connect_timeout.is_zero() {
         return Err(SshConnectError::InvalidConfig("connect timeout is zero"));
+    }
+    if host.inactivity_timeout.is_some_and(|duration| {
+        duration < Duration::from_millis(1) || duration > Duration::from_secs(7 * 24 * 60 * 60)
+    }) {
+        return Err(SshConnectError::InvalidConfig(
+            "SSH inactivity timeout must be between 1 ms and 7 days",
+        ));
     }
     if known_hosts_paths.len() > MAX_KNOWN_HOSTS_PATHS {
         return Err(SshConnectError::InvalidConfig("too many known_hosts files"));

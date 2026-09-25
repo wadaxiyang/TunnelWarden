@@ -136,6 +136,7 @@ async fn reverse_channel_reaches_local_target_and_stop_cancels_registration() {
         connect_timeout: Duration::from_secs(5),
         keepalive_interval: Duration::from_secs(10),
         keepalive_max: 3,
+        inactivity_timeout: None,
         notes: String::new(),
     };
     let root = CancellationToken::new();

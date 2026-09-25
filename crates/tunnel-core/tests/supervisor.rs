@@ -137,6 +137,7 @@ async fn reconnect_keeps_listener_and_restores_forwarded_traffic() {
         connect_timeout: Duration::from_secs(5),
         keepalive_interval: Duration::from_secs(10),
         keepalive_max: 3,
+        inactivity_timeout: None,
         notes: String::new(),
     };
     let mut listener = ListenerRuntime::new();

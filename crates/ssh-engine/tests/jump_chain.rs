@@ -146,6 +146,7 @@ fn host(id: &str, address: SocketAddr) -> SshHost {
         connect_timeout: Duration::from_secs(5),
         keepalive_interval: Duration::from_secs(10),
         keepalive_max: 3,
+        inactivity_timeout: None,
         notes: String::new(),
     }
 }

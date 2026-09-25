@@ -1746,6 +1746,8 @@ impl Workspace {
                         &editor.keepalive_interval_ms,
                     ))
                     .child(input_row("Keepalive max failures", &editor.keepalive_max))
+                    .child(input_row("SSH transport inactivity (ms, blank = off)", &editor.inactivity_timeout_ms))
+                    .child("Blank keeps an idle SSH session open. Keepalive replies and health probes are transport activity; keepalive failure detection and health checks still handle an unresponsive server. This does not close individual forwarded TCP connections.")
                     .child(div().font_semibold().child("Notes"))
                     .child(input_row("Notes", &editor.notes));
             }
