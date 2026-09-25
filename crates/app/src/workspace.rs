@@ -114,6 +114,7 @@ pub struct Workspace {
     _log_search_subscription: Subscription,
     editor: Option<Editor>,
     context_session: u64,
+    pending_page: Option<Page>,
     group_editor: Option<GroupEditor>,
     pending_group_delete: Option<GroupId>,
     saving: bool,
@@ -144,6 +145,11 @@ impl Workspace {
             self.pending_group_delete = None;
             self.import_preview = None;
             self.ssh_preview = None;
+            if let Some(page) = self.pending_page.take() {
+                self.page = page;
+                self.page_index = 0;
+                self.advance_context();
+            }
         }
         self.command_error = None;
         self.save_warning = (!receipt.warnings.is_empty()).then(|| {
@@ -253,6 +259,7 @@ impl Workspace {
             _log_search_subscription: log_search_subscription,
             editor: None,
             context_session: 1,
+            pending_page: None,
             group_editor: None,
             pending_group_delete: None,
             saving: false,
@@ -774,13 +781,43 @@ impl Workspace {
     }
 
     fn select_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if (self.editor.is_some() || self.group_editor.is_some()) && self.page != page {
+            self.pending_page = Some(page);
+            cx.notify();
+            return;
+        }
         self.advance_context();
         self.page = page;
         self.page_index = 0;
         self.editor = None;
         self.group_editor = None;
+        self.pending_page = None;
         self.pending_group_delete = None;
         cx.notify();
+    }
+
+    fn discard_draft_and_navigate(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self.pending_page.take() else {
+            return;
+        };
+        self.editor = None;
+        self.group_editor = None;
+        self.command_error = None;
+        self.page = page;
+        self.page_index = 0;
+        self.advance_context();
+        cx.notify();
+    }
+
+    fn save_draft_and_navigate(&mut self, cx: &mut Context<Self>) {
+        if self.saving {
+            return;
+        }
+        if self.editor.is_some() {
+            self.save_editor(cx);
+        } else if self.group_editor.is_some() {
+            self.save_group(cx);
+        }
     }
 
     fn page_count(&self) -> usize {
@@ -854,6 +891,50 @@ impl Workspace {
             );
         let content = if let Some(prompt) = self.host_key_prompts.first() {
             content.child(self.render_host_key_prompt(prompt, cx))
+        } else {
+            content
+        };
+        let content = if let Some(page) = self.pending_page {
+            content.child(
+                div()
+                    .px_6()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(cx.theme().warning)
+                    .child(format!("Leave this draft for {}?", page.title()))
+                    .child(
+                        div()
+                            .flex()
+                            .gap_2()
+                            .pt_2()
+                            .child(
+                                Button::new("save-draft-and-leave")
+                                    .primary()
+                                    .label("Save")
+                                    .disabled(self.saving)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.save_draft_and_navigate(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("discard-draft-and-leave")
+                                    .label("Discard")
+                                    .disabled(self.saving)
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.discard_draft_and_navigate(cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new("stay-with-draft")
+                                    .ghost()
+                                    .label("Stay")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.pending_page = None;
+                                        cx.notify();
+                                    })),
+                            ),
+                    ),
+            )
         } else {
             content
         };
@@ -2180,6 +2261,7 @@ mod ui_tests {
         });
         cx.update_window(handle.into(), |_, window, cx| {
             window.click("Jumpers", cx);
+            window.click("discard-draft-and-leave", cx);
             window.click("new-host", cx);
             window.click("Name", cx);
             window.input("Later draft", cx);
@@ -2207,6 +2289,42 @@ mod ui_tests {
                     );
                 })
                 .expect("later editor survives");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn navigation_keeps_draft_until_user_saves_or_discards_it(cx: &mut TestAppContext) {
+        cx.update(gpui_kit::init);
+        let config = ConfigDocument::default()
+            .into_domain()
+            .expect("default config");
+        let handle = cx.add_window(move |window, cx| {
+            Workspace::new(Ok((PathBuf::new(), config)), None, None, window, cx)
+        });
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.click("Tunnels", cx);
+            window.click("new-tunnel", cx);
+            window.click("Name", cx);
+            window.input("Unfinished tunnel", cx);
+            window.click("Jumpers", cx);
+            assert!(window.find("save-draft-and-leave").visible());
+            assert!(window.find("discard-draft-and-leave").visible());
+            window.click("stay-with-draft", cx);
+            assert_eq!(window.find("Name").value(), Some("Unfinished tunnel"));
+            window.click("Jumpers", cx);
+            window.click("save-draft-and-leave", cx);
+            assert!(window.find("discard-draft-and-leave").visible());
+            window.click("discard-draft-and-leave", cx);
+            assert!(window.find("new-host").visible());
+        })
+        .expect("draft navigation");
+        cx.update(|app| {
+            handle
+                .update(app, |view, _, _| {
+                    assert_eq!(view.page, Page::Jumpers);
+                    assert!(view.editor.is_none());
+                })
+                .expect("draft discarded");
         });
     }
 
