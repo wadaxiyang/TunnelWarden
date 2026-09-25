@@ -15,7 +15,8 @@ pub use health::WorkerHealth;
 pub use local_forward::{LocalForwardError, LocalForwardWorker};
 pub use manager::{
     CoreCommand, CredentialSource, HostKeyPromptView, LogEvent, LogLevel, LogSnapshot, LogSource,
-    ManagerError, ManagerHandle, ManagerSnapshot, SecretUpdate, TunnelManager, TunnelView,
+    ManagerError, ManagerHandle, ManagerSnapshot, SaveReceipt, SecretUpdate, TunnelManager,
+    TunnelView,
 };
 pub use remote_forward::{RemoteForwardError, RemoteForwardWorker};
 pub use remote_supervisor::RemoteForwardSupervisor;

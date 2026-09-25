@@ -14,8 +14,8 @@ pub enum StartupError {
     Unsupported,
 }
 
-/// Updates this user's Run entry. The caller performs this on a blocking
-/// worker and rolls it back if its paired configuration write fails.
+/// Reconciles this user's Run entry with an already committed preference.
+/// The caller performs this on a blocking worker and reports failures separately.
 pub fn set_run_at_login(enabled: bool) -> Result<(), StartupError> {
     #[cfg(windows)]
     {

@@ -7,8 +7,8 @@ use std::{
 };
 
 use config_store::{
-    AppSettings, ConfigDocument, ConfigStore, DomainConfig, SecretStore, SshImportPreview,
-    preview_ssh_config, set_run_at_login,
+    AppSettings, ConfigDocument, ConfigStore, DomainConfig, SaveOutcome, SecretStore,
+    SshImportPreview, preview_ssh_config, set_run_at_login,
 };
 use ssh_engine::{
     HopSpec, HostKeyApproval, HostKeyDecision, HostKeyPrompt, SshChain, SshChainError,
@@ -100,7 +100,7 @@ pub enum CoreCommand {
         directory: PathBuf,
         config: DomainConfig,
         secret: Option<SecretUpdate>,
-        reply: oneshot::Sender<Result<(), String>>,
+        reply: oneshot::Sender<Result<SaveReceipt, String>>,
     },
     ImportConfig {
         path: PathBuf,
@@ -125,6 +125,11 @@ pub struct SecretUpdate {
     /// A new keyring reference. Existing secrets remain available on failure.
     pub reference: SecretRef,
     pub value: Zeroizing<String>,
+}
+
+pub struct SaveReceipt {
+    pub canonical_config: DomainConfig,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Error)]
@@ -364,11 +369,13 @@ impl TunnelManager {
                             .map_err(|error| error.to_string());
                         let result = match canonical {
                             Ok(config) => {
-                                let result = Self::persist_config(directory, config.clone(), secret, old_run_at_login).await;
-                                if result.is_ok() {
-                                    self.replace_config(config).await;
+                                match Self::persist_config(directory, config.clone(), secret, old_run_at_login).await {
+                                    Ok(outcome) => {
+                                        self.replace_config(config.clone()).await;
+                                        Ok(SaveReceipt { canonical_config: config, warnings: outcome.warnings })
+                                    }
+                                    Err(error) => Err(error),
                                 }
-                                result
                             }
                             Err(error) => Err(error),
                         };
@@ -461,7 +468,7 @@ impl TunnelManager {
         config: DomainConfig,
         secret: Option<SecretUpdate>,
         old_run_at_login: bool,
-    ) -> Result<(), String> {
+    ) -> Result<SaveOutcome, String> {
         tokio::task::spawn_blocking(move || {
             let run_at_login = config.app.run_at_startup;
             let document = ConfigDocument::try_from(config).map_err(|error| error.to_string())?;
@@ -469,26 +476,20 @@ impl TunnelManager {
                 SecretStore::save(&secret.reference, &secret.value)
                     .map_err(|error| error.to_string())?;
             }
-            if run_at_login != old_run_at_login
-                && let Err(error) = set_run_at_login(run_at_login)
-            {
-                if let Some(secret) = &secret {
-                    let _ = SecretStore::delete(&secret.reference);
-                }
-                return Err(error.to_string());
-            }
             match ConfigStore::new(directory).save(document) {
-                Ok(()) => Ok(()),
+                Ok(mut outcome) => {
+                    if run_at_login != old_run_at_login
+                        && let Err(error) = set_run_at_login(run_at_login)
+                    {
+                        outcome.warnings.push(format!(
+                            "Configuration saved, but login startup was not applied: {error}"
+                        ));
+                    }
+                    Ok(outcome)
+                }
                 Err(error) => {
                     if let Some(secret) = &secret {
                         let _ = SecretStore::delete(&secret.reference);
-                    }
-                    if run_at_login != old_run_at_login
-                        && let Err(rollback) = set_run_at_login(old_run_at_login)
-                    {
-                        return Err(format!(
-                            "{error}; could not restore login startup setting: {rollback}"
-                        ));
                     }
                     Err(error.to_string())
                 }
@@ -1208,6 +1209,57 @@ mod config_tests {
             key_path(&reloaded.hosts[0])
         );
         assert!(!key_path(&reloaded.hosts[0]).starts_with("~"));
+        handle.shutdown();
+        task.await.expect("manager shutdown");
+    }
+
+    #[tokio::test]
+    async fn committed_save_warning_still_updates_manager_config() {
+        let directory = TempDir::new().expect("temporary directory");
+        let store = ConfigStore::new(directory.path().to_path_buf());
+        store.save(ConfigDocument::default()).expect("initial save");
+        let backups = directory.path().join("backups");
+        std::fs::create_dir_all(&backups).expect("backup directory");
+        std::fs::create_dir(backups.join("config-0000000000000-0.toml"))
+            .expect("unremovable old backup");
+        for index in 1..=4 {
+            std::fs::write(
+                backups.join(format!("config-000000000000{index}-0.toml")),
+                "old backup",
+            )
+            .expect("backup fixture");
+        }
+        let (manager, handle) = TunnelManager::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        let task = tokio::spawn(manager.run());
+        let (reply, answer) = oneshot::channel();
+        let app = AppSettings {
+            minimize_to_tray: false,
+            ..AppSettings::default()
+        };
+        handle
+            .try_send(CoreCommand::SaveConfig {
+                directory: directory.path().to_path_buf(),
+                config: DomainConfig {
+                    app,
+                    hosts: Vec::new(),
+                    groups: Vec::new(),
+                    tunnels: Vec::new(),
+                },
+                secret: None,
+                reply,
+            })
+            .expect("queue save");
+        let receipt = answer.await.expect("save reply").expect("committed save");
+        assert!(!receipt.warnings.is_empty());
+        assert!(!receipt.canonical_config.app.minimize_to_tray);
+        assert!(!handle.subscribe_config().borrow().app.minimize_to_tray);
+        assert!(!store.load().expect("committed file").app.minimize_to_tray);
         handle.shutdown();
         task.await.expect("manager shutdown");
     }

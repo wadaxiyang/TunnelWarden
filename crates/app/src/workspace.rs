@@ -101,6 +101,7 @@ pub struct Workspace {
     manager: Option<ManagerHandle>,
     snapshot: Arc<ManagerSnapshot>,
     command_error: Option<String>,
+    save_warning: Option<String>,
     runtime_error: Option<String>,
     _updates: Option<Task<()>>,
     _host_key_updates: Option<Task<()>>,
@@ -211,6 +212,7 @@ impl Workspace {
             manager,
             snapshot,
             command_error: None,
+            save_warning: None,
             runtime_error,
             _updates: updates,
             _host_key_updates: host_key_updates,
@@ -477,7 +479,7 @@ impl Workspace {
         let (reply, answer) = oneshot::channel();
         if let Err(error) = manager.try_send(CoreCommand::SaveConfig {
             directory: directory.clone(),
-            config: config.clone(),
+            config,
             secret,
             reply,
         }) {
@@ -487,6 +489,7 @@ impl Workspace {
         }
         self.saving = true;
         self.command_error = None;
+        self.save_warning = None;
         self._save_task = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
             let result = answer
                 .await
@@ -494,14 +497,20 @@ impl Workspace {
             let _ = this.update(cx, |view, cx| {
                 view.saving = false;
                 match result {
-                    Ok(()) => {
-                        view.startup = Ok((directory, config));
+                    Ok(receipt) => {
+                        view.startup = Ok((directory, receipt.canonical_config));
                         view.editor = None;
                         view.group_editor = None;
                         view.pending_group_delete = None;
                         view.import_preview = None;
                         view.ssh_preview = None;
                         view.command_error = None;
+                        view.save_warning = (!receipt.warnings.is_empty()).then(|| {
+                            format!(
+                                "Configuration saved with maintenance warnings: {}",
+                                receipt.warnings.join("; ")
+                            )
+                        });
                     }
                     Err(error) => view.command_error = Some(error),
                 }
@@ -842,6 +851,14 @@ impl Workspace {
                     .py_2()
                     .text_color(cx.theme().danger)
                     .child(error.clone()),
+            )
+        } else if let Some(warning) = &self.save_warning {
+            content.child(
+                div()
+                    .px_6()
+                    .py_2()
+                    .text_color(cx.theme().warning)
+                    .child(warning.clone()),
             )
         } else if let Some(error) = &self.runtime_error {
             content.child(

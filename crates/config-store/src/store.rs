@@ -2,6 +2,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -11,6 +12,13 @@ use crate::{ConfigDocument, ConfigValidationError, DomainConfig};
 
 const MAX_CONFIG_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_BACKUPS: usize = 5;
+static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Default)]
+pub struct SaveOutcome {
+    /// Maintenance failures after the main configuration was committed.
+    pub warnings: Vec<String>,
+}
 
 #[derive(Debug, Error)]
 pub enum ConfigStoreError {
@@ -32,6 +40,10 @@ pub enum ConfigStoreError {
     Validation(#[from] ConfigValidationError),
     #[error("too many backup names share the current timestamp")]
     BackupNameConflict,
+    #[error(
+        "configuration recovery is required; main file is missing but a temporary file or backup remains near {0}"
+    )]
+    RecoveryRequired(PathBuf),
 }
 
 pub struct ConfigStore {
@@ -53,10 +65,17 @@ impl ConfigStore {
     }
 
     pub fn load(&self) -> Result<DomainConfig, ConfigStoreError> {
+        let _lock = self.lock_directory()?;
         let path = self.directory.join("config.toml");
         match File::open(&path) {
-            Ok(file) => Self::read_file(path, file),
+            Ok(file) => {
+                let config = Self::read_file(path, file)?;
+                Ok(config)
+            }
             Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                if self.has_recovery_artifacts()? {
+                    return Err(ConfigStoreError::RecoveryRequired(path));
+                }
                 Ok(ConfigDocument::default().into_domain()?)
             }
             Err(source) => Err(io_error(path, source)),
@@ -108,21 +127,27 @@ impl ConfigStore {
     /// Writes a validated schema-v1 document through a synced temporary file.
     /// Existing config is backed up before replacement. A failed rename leaves
     /// the original file untouched and removes the temporary file on drop.
-    pub fn save(&self, document: ConfigDocument) -> Result<(), ConfigStoreError> {
+    pub fn save(&self, document: ConfigDocument) -> Result<SaveOutcome, ConfigStoreError> {
+        let canonical = document.into_domain()?;
+        let document = ConfigDocument::try_from(canonical)?;
         let serialized = toml::to_string_pretty(&document)?;
-        document.into_domain()?;
         if serialized.len() as u64 > MAX_CONFIG_BYTES {
             return Err(ConfigStoreError::TooLarge);
         }
-        fs::create_dir_all(&self.directory)
-            .map_err(|source| io_error(self.directory.clone(), source))?;
+        let _lock = self.lock_directory()?;
         let path = self.directory.join("config.toml");
-        let temp_path = self.directory.join("config.toml.tmp");
-        let mut temp = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .map_err(|source| io_error(temp_path.clone(), source))?;
+        match File::open(&path) {
+            Ok(file) => {
+                Self::read_file(path.clone(), file)?;
+            }
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {
+                if self.has_recovery_artifacts()? {
+                    return Err(ConfigStoreError::RecoveryRequired(path));
+                }
+            }
+            Err(source) => return Err(io_error(path, source)),
+        }
+        let (temp_path, mut temp) = self.create_temp()?;
         let cleanup = TempCleanup(&temp_path);
         temp.write_all(serialized.as_bytes())
             .and_then(|()| temp.sync_all())
@@ -133,7 +158,110 @@ impl ConfigStore {
         }
         fs::rename(&temp_path, &path).map_err(|source| io_error(path, source))?;
         drop(cleanup);
-        self.prune_backups()?;
+        let mut outcome = SaveOutcome::default();
+        if let Err(error) = self.prune_backups() {
+            outcome.warnings.push(error.to_string());
+        }
+        if let Err(error) = self.clean_orphaned_temps() {
+            outcome.warnings.push(error.to_string());
+        }
+        Ok(outcome)
+    }
+
+    fn lock_directory(&self) -> Result<File, ConfigStoreError> {
+        fs::create_dir_all(&self.directory)
+            .map_err(|source| io_error(self.directory.clone(), source))?;
+        let path = self.directory.join("config.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .map_err(|source| io_error(path.clone(), source))?;
+        file.lock().map_err(|source| io_error(path, source))?;
+        Ok(file)
+    }
+
+    fn create_temp(&self) -> Result<(PathBuf, File), ConfigStoreError> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        for _ in 0..10 {
+            let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let path = self.directory.join(format!(
+                "config.toml.tw-{stamp:x}-{:x}-{sequence:x}.tmp",
+                std::process::id()
+            ));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(file) => return Ok((path, file)),
+                Err(source) if source.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(source) => return Err(io_error(path, source)),
+            }
+        }
+        Err(ConfigStoreError::BackupNameConflict)
+    }
+
+    fn has_recovery_artifacts(&self) -> Result<bool, ConfigStoreError> {
+        let entries = fs::read_dir(&self.directory)
+            .map_err(|source| io_error(self.directory.clone(), source))?;
+        for entry in entries {
+            let entry = entry.map_err(|source| io_error(self.directory.clone(), source))?;
+            if is_config_temp(&entry.file_name().to_string_lossy()) {
+                return Ok(true);
+            }
+        }
+        let backups = self.directory.join("backups");
+        if backups.exists() {
+            let entries =
+                fs::read_dir(&backups).map_err(|source| io_error(backups.clone(), source))?;
+            for entry in entries {
+                let entry = entry.map_err(|source| io_error(backups.clone(), source))?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with("config-")
+                    && (name.ends_with(".toml") || name.ends_with(".toml.tmp"))
+                {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    fn clean_orphaned_temps(&self) -> Result<(), ConfigStoreError> {
+        let entries = fs::read_dir(&self.directory)
+            .map_err(|source| io_error(self.directory.clone(), source))?;
+        for entry in entries {
+            let entry = entry.map_err(|source| io_error(self.directory.clone(), source))?;
+            if is_config_temp(&entry.file_name().to_string_lossy())
+                && entry
+                    .file_type()
+                    .map_err(|source| io_error(entry.path(), source))?
+                    .is_file()
+            {
+                fs::remove_file(entry.path()).map_err(|source| io_error(entry.path(), source))?;
+            }
+        }
+        let backups = self.directory.join("backups");
+        if backups.exists() {
+            let entries =
+                fs::read_dir(&backups).map_err(|source| io_error(backups.clone(), source))?;
+            for entry in entries {
+                let entry = entry.map_err(|source| io_error(backups.clone(), source))?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with("config-")
+                    && name.ends_with(".toml.tmp")
+                    && entry
+                        .file_type()
+                        .map_err(|source| io_error(entry.path(), source))?
+                        .is_file()
+                {
+                    fs::remove_file(entry.path())
+                        .map_err(|source| io_error(entry.path(), source))?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -214,6 +342,10 @@ impl Drop for TempCleanup<'_> {
 
 fn io_error(path: PathBuf, source: io::Error) -> ConfigStoreError {
     ConfigStoreError::Io { path, source }
+}
+
+fn is_config_temp(name: &str) -> bool {
+    name == "config.toml.tmp" || (name.starts_with("config.toml.tw-") && name.ends_with(".tmp"))
 }
 
 #[cfg(test)]
@@ -306,6 +438,121 @@ description = "Primary SOCKS5 proxy"
             .count();
         assert_eq!(backups, MAX_BACKUPS);
         assert!(!directory.path().join("config.toml.tmp").exists());
+    }
+
+    #[test]
+    fn post_commit_prune_failure_reports_warning_and_keeps_new_config() {
+        let directory = TempDir::new().expect("temporary directory");
+        let store = ConfigStore::new(directory.path().to_path_buf());
+        store.save(ConfigDocument::default()).expect("initial save");
+        let backups = directory.path().join("backups");
+        fs::create_dir_all(&backups).expect("backup directory");
+        let blocked = backups.join("config-0000000000000-0.toml");
+        fs::create_dir(&blocked).expect("oldest backup is a directory");
+        for index in 1..=4 {
+            fs::write(
+                backups.join(format!("config-000000000000{index}-0.toml")),
+                "old backup",
+            )
+            .expect("backup fixture");
+        }
+        let mut updated = ConfigDocument::default();
+        updated.app.theme = ThemePreference::Dark;
+        let outcome = store.save(updated).expect("main file committed");
+        assert_eq!(outcome.warnings.len(), 1);
+        assert_eq!(
+            store.load().expect("new file readable").app.theme,
+            ThemePreference::Dark
+        );
+        assert!(blocked.is_dir());
+    }
+
+    #[test]
+    fn crashed_temp_does_not_block_next_save() {
+        let directory = TempDir::new().expect("temporary directory");
+        let store = ConfigStore::new(directory.path().to_path_buf());
+        store.save(ConfigDocument::default()).expect("initial save");
+        let orphan = directory.path().join("config.toml.tw-crashed-1-0.tmp");
+        fs::write(&orphan, "partial write").expect("orphan fixture");
+        let mut updated = ConfigDocument::default();
+        updated.app.theme = ThemePreference::Light;
+        let outcome = store.save(updated).expect("save after crash");
+        assert!(outcome.warnings.is_empty());
+        assert!(!orphan.exists());
+        assert_eq!(
+            store.load().expect("reload").app.theme,
+            ThemePreference::Light
+        );
+    }
+
+    #[test]
+    fn next_save_recovers_after_child_process_exits_during_temp_write() {
+        let directory = TempDir::new().expect("temporary directory");
+        let store = ConfigStore::new(directory.path().to_path_buf());
+        store.save(ConfigDocument::default()).expect("initial save");
+        let status = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .arg("--exact")
+            .arg("store::tests::exit_during_temp_write_child")
+            .env("TUNNELWARDEN_CONFIG_CRASH_TEST_DIRECTORY", directory.path())
+            .status()
+            .expect("launch child");
+        assert_eq!(status.code(), Some(17));
+        let mut updated = ConfigDocument::default();
+        updated.app.theme = ThemePreference::Dark;
+        store.save(updated).expect("next save after child exit");
+        assert_eq!(
+            store.load().expect("reload").app.theme,
+            ThemePreference::Dark
+        );
+    }
+
+    #[test]
+    fn exit_during_temp_write_child() {
+        let Some(directory) = std::env::var_os("TUNNELWARDEN_CONFIG_CRASH_TEST_DIRECTORY") else {
+            return;
+        };
+        let store = ConfigStore::new(PathBuf::from(directory));
+        let (_path, mut file) = store.create_temp().expect("create unique temp");
+        file.write_all(b"partial configuration")
+            .expect("write partial");
+        file.sync_all().expect("sync partial");
+        std::process::exit(17);
+    }
+
+    #[test]
+    fn missing_main_file_with_orphan_requires_recovery() {
+        let directory = TempDir::new().expect("temporary directory");
+        let orphan = directory.path().join("config.toml.tw-crashed-1-0.tmp");
+        fs::write(&orphan, "partial write").expect("orphan fixture");
+        let store = ConfigStore::new(directory.path().to_path_buf());
+        assert!(matches!(
+            store.load(),
+            Err(ConfigStoreError::RecoveryRequired(_))
+        ));
+        assert!(matches!(
+            store.save(ConfigDocument::default()),
+            Err(ConfigStoreError::RecoveryRequired(_))
+        ));
+        assert!(orphan.exists());
+    }
+
+    #[test]
+    fn missing_main_file_with_backup_is_not_treated_as_empty_config() {
+        let directory = TempDir::new().expect("temporary directory");
+        let store = ConfigStore::new(directory.path().to_path_buf());
+        store.save(ConfigDocument::default()).expect("initial save");
+        let mut updated = ConfigDocument::default();
+        updated.app.theme = ThemePreference::Light;
+        store.save(updated).expect("second save creates backup");
+        fs::remove_file(directory.path().join("config.toml")).expect("simulate missing main");
+        assert!(matches!(
+            store.load(),
+            Err(ConfigStoreError::RecoveryRequired(_))
+        ));
+        assert!(matches!(
+            store.save(ConfigDocument::default()),
+            Err(ConfigStoreError::RecoveryRequired(_))
+        ));
     }
 
     #[test]
