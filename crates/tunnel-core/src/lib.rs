@@ -27,4 +27,7 @@ pub use state_machine::{
     Event, EventOutcome, Lifecycle, MachineError, RuntimePhase, StateMachine, StateTransition,
     TransitionEffect,
 };
-pub use supervisor::{LocalForwardSupervisor, SupervisorError, SupervisorMode, SupervisorState};
+pub use supervisor::{
+    AvailableActions, LocalForwardSupervisor, SupervisorError, SupervisorMode, SupervisorState,
+    TunnelAction, actions_for,
+};

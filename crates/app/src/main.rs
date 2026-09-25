@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 #[cfg(windows)]
 use tray::{TrayAction, TrayController};
 #[cfg(windows)]
-use tunnel_core::{CoreCommand, ManagerSnapshot, SupervisorState};
+use tunnel_core::{CoreCommand, ManagerSnapshot, TunnelAction};
 
 type Startup = Result<(PathBuf, DomainConfig), String>;
 
@@ -157,22 +157,16 @@ fn main() {
                                     let _ = handle.try_send(CoreCommand::StopAll);
                                 }
                             }
-                            TrayAction::Toggle(id) => {
+                            TrayAction::Tunnel(id, action) => {
                                 if let Some(handle) = &action_manager {
-                                    let active =
-                                        handle.subscribe().borrow().get(&id).is_some_and(|view| {
-                                            !matches!(
-                                                view.state,
-                                                SupervisorState::Stopped
-                                                    | SupervisorState::Blocked { .. }
-                                            )
-                                        });
-                                    let command = if active {
-                                        CoreCommand::StopTunnel(id)
-                                    } else {
-                                        CoreCommand::StartTunnel(id)
+                                    let command = match action {
+                                        TunnelAction::Start => CoreCommand::StartTunnel(id),
+                                        TunnelAction::Stop => CoreCommand::StopTunnel(id),
+                                        TunnelAction::Retry => CoreCommand::RetryTunnel(id),
                                     };
-                                    let _ = handle.try_send(command);
+                                    if let Err(error) = handle.try_send(command) {
+                                        eprintln!("Tray tunnel action was not accepted: {error}");
+                                    }
                                 }
                             }
                             TrayAction::Quit => {

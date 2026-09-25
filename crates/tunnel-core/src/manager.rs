@@ -958,6 +958,7 @@ fn same_host_connection(old: Option<&SshHost>, new: Option<&SshHost>) -> bool {
 mod config_tests {
     use super::*;
     use config_store::AppSettings;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tempfile::TempDir;
     use tunnel_domain::{HostId, HostKeyPolicy, LocalEndpoint, RetryPolicy};
 
@@ -1063,6 +1064,79 @@ mod config_tests {
         manager.stop(&tunnel.id).await;
         std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port))
             .expect("IPv6 listener released");
+    }
+
+    #[tokio::test]
+    async fn blocked_retry_retries_and_stop_releases_listener() {
+        struct CountingCredentials(Arc<AtomicUsize>);
+        impl CredentialSource for CountingCredentials {
+            fn load(&self, _: &SecretRef) -> Result<Zeroizing<String>, String> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Err("credential unavailable".into())
+            }
+        }
+
+        let reserve = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve port");
+        let port = reserve.local_addr().expect("reserved address").port();
+        drop(reserve);
+        let tunnel = test_tunnel("127.0.0.1", port);
+        let mut host = test_host();
+        host.auth = AuthConfig::Password {
+            credential_ref: SecretRef("missing".into()),
+        };
+        let loads = Arc::new(AtomicUsize::new(0));
+        let (manager, handle) = TunnelManager::new(
+            vec![host],
+            Vec::new(),
+            vec![tunnel.clone()],
+            Arc::new(CountingCredentials(Arc::clone(&loads))),
+        )
+        .expect("manager");
+        let task = tokio::spawn(manager.run());
+        let mut snapshots = handle.subscribe();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                snapshots.changed().await.expect("snapshot update");
+                if matches!(
+                    snapshots.borrow_and_update()[&tunnel.id].state,
+                    SupervisorState::Blocked { .. }
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("blocked state");
+        assert!(std::net::TcpListener::bind(("127.0.0.1", port)).is_err());
+        handle
+            .try_send(CoreCommand::RetryTunnel(tunnel.id.clone()))
+            .expect("retry command");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while loads.load(Ordering::SeqCst) < 2 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("second credential load");
+        handle
+            .try_send(CoreCommand::StopTunnel(tunnel.id.clone()))
+            .expect("stop command");
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                snapshots.changed().await.expect("snapshot update");
+                if matches!(
+                    snapshots.borrow_and_update()[&tunnel.id].state,
+                    SupervisorState::Stopped
+                ) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("stopped state");
+        std::net::TcpListener::bind(("127.0.0.1", port)).expect("listener released");
+        handle.shutdown();
+        task.await.expect("manager shutdown");
     }
 
     #[test]

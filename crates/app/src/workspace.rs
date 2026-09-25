@@ -20,7 +20,7 @@ use gpui_kit::{
 use tokio::sync::oneshot;
 use tunnel_core::{
     CoreCommand, HostKeyDecision, HostKeyPromptView, LogEvent, LogLevel, LogSnapshot, LogSource,
-    ManagerHandle, ManagerSnapshot, SecretUpdate, SupervisorState,
+    ManagerHandle, ManagerSnapshot, SecretUpdate, SupervisorState, TunnelAction, actions_for,
 };
 use tunnel_domain::TunnelMode;
 use tunnel_domain::{AuthConfig, GroupId, HostId, HostKeyPolicy, SecretRef, TunnelGroup, TunnelId};
@@ -1884,22 +1884,49 @@ impl Workspace {
             let label = state_label(state);
             let details = status_details(state, view.and_then(|view| view.local_addr).is_some());
             let id = tunnel.id.clone();
-            let (button_label, action_kind) = match state {
-                SupervisorState::Stopped => ("Start", 0),
-                SupervisorState::Blocked { .. } => ("Retry", 1),
-                _ => ("Stop", 2),
+            let available = actions_for(state);
+            let button_label = match available.primary {
+                TunnelAction::Start => "Start",
+                TunnelAction::Retry => "Retry",
+                TunnelAction::Stop => "Stop",
             };
+            let action_kind = available.primary;
             let action = Button::new(format!("{}-action", id.0))
                 .label(button_label)
                 .disabled(self.manager.is_none())
                 .on_click(cx.listener(move |this, _, _, cx| {
                     let command = match action_kind {
-                        0 => CoreCommand::StartTunnel(id.clone()),
-                        1 => CoreCommand::RetryTunnel(id.clone()),
-                        _ => CoreCommand::StopTunnel(id.clone()),
+                        TunnelAction::Start => CoreCommand::StartTunnel(id.clone()),
+                        TunnelAction::Retry => CoreCommand::RetryTunnel(id.clone()),
+                        TunnelAction::Stop => CoreCommand::StopTunnel(id.clone()),
                     };
                     this.request(command, cx);
                 }));
+            let mut controls = div()
+                .flex()
+                .gap_2()
+                .child(
+                    Button::new(format!("edit-tunnel-{}", tunnel.id.0))
+                        .label("Edit")
+                        .on_click({
+                            let id = tunnel.id.clone();
+                            cx.listener(move |this, _, window, cx| {
+                                this.edit_tunnel(&id, window, cx)
+                            })
+                        }),
+                )
+                .child(action);
+            if available.primary == TunnelAction::Retry && available.can_stop {
+                let id = tunnel.id.clone();
+                controls = controls.child(
+                    Button::new(format!("stop-blocked-{}", id.0))
+                        .label("Stop")
+                        .disabled(self.manager.is_none())
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.request(CoreCommand::StopTunnel(id.clone()), cx)
+                        })),
+                );
+            }
             let mut info = div()
                 .flex()
                 .flex_col()
@@ -1935,22 +1962,7 @@ impl Workspace {
                     .border_b_1()
                     .border_color(cx.theme().border)
                     .child(info)
-                    .child(
-                        div()
-                            .flex()
-                            .gap_2()
-                            .child(
-                                Button::new(format!("edit-tunnel-{}", tunnel.id.0))
-                                    .label("Edit")
-                                    .on_click({
-                                        let id = tunnel.id.clone();
-                                        cx.listener(move |this, _, window, cx| {
-                                            this.edit_tunnel(&id, window, cx)
-                                        })
-                                    }),
-                            )
-                            .child(action),
-                    ),
+                    .child(controls),
             );
         }
         div()
@@ -2278,6 +2290,7 @@ mod ui_tests {
                 Some("host key rejected")
             );
             assert_eq!(window.find("demo-action").label(), Some("Retry"));
+            assert_eq!(window.find("stop-blocked-demo").label(), Some("Stop"));
         })
         .expect("blocked UI");
         cx.update(|app| {

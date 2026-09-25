@@ -54,6 +54,54 @@ pub enum SupervisorState {
     Stopped,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TunnelAction {
+    Start,
+    Stop,
+    Retry,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AvailableActions {
+    pub primary: TunnelAction,
+    pub can_stop: bool,
+}
+
+pub fn actions_for(state: &SupervisorState) -> AvailableActions {
+    match state {
+        SupervisorState::Stopped => AvailableActions {
+            primary: TunnelAction::Start,
+            can_stop: false,
+        },
+        SupervisorState::Blocked { .. } => AvailableActions {
+            primary: TunnelAction::Retry,
+            can_stop: true,
+        },
+        _ => AvailableActions {
+            primary: TunnelAction::Stop,
+            can_stop: true,
+        },
+    }
+}
+
+#[cfg(test)]
+mod action_tests {
+    use super::*;
+
+    #[test]
+    fn blocked_exposes_retry_and_stop() {
+        let actions = actions_for(&SupervisorState::Blocked {
+            reason: "missing credential".into(),
+        });
+        assert_eq!(actions.primary, TunnelAction::Retry);
+        assert!(actions.can_stop);
+        assert_eq!(
+            actions_for(&SupervisorState::Stopped).primary,
+            TunnelAction::Start
+        );
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum SupervisorMode {
     Local(RemoteEndpoint),

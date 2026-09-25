@@ -4,14 +4,14 @@ use tray_icon::{
     Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent,
     menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem},
 };
-use tunnel_core::{ManagerSnapshot, SupervisorState};
+use tunnel_core::{AvailableActions, ManagerSnapshot, SupervisorState, TunnelAction, actions_for};
 use tunnel_domain::TunnelId;
 
 pub enum TrayAction {
     Open,
     StartAll,
     StopAll,
-    Toggle(TunnelId),
+    Tunnel(TunnelId, TunnelAction),
     Quit,
 }
 
@@ -22,7 +22,7 @@ pub struct TrayController {
 
 #[derive(PartialEq, Eq)]
 struct TrayPresentation {
-    tunnels: Vec<(TunnelId, String, bool)>,
+    tunnels: Vec<(TunnelId, String, AvailableActions)>,
     remaining: usize,
     healthy: usize,
     reconnecting: usize,
@@ -35,13 +35,11 @@ impl TrayPresentation {
             .iter()
             .take(25)
             .map(|tunnel| {
-                let active = snapshot.get(&tunnel.id).is_some_and(|view| {
-                    !matches!(
-                        view.state,
-                        SupervisorState::Stopped | SupervisorState::Blocked { .. }
-                    )
-                });
-                (tunnel.id.clone(), tunnel.name.clone(), active)
+                let actions = snapshot
+                    .get(&tunnel.id)
+                    .map(|view| actions_for(&view.state))
+                    .unwrap_or_else(|| actions_for(&SupervisorState::Stopped));
+                (tunnel.id.clone(), tunnel.name.clone(), actions)
             })
             .collect();
         Self {
@@ -74,13 +72,8 @@ impl TrayController {
     ) -> Result<Self, String> {
         let menu_sender = actions.clone();
         MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
-            let action = match event.id().0.as_str() {
-                "open" => TrayAction::Open,
-                "start-all" => TrayAction::StartAll,
-                "stop-all" => TrayAction::StopAll,
-                "quit" => TrayAction::Quit,
-                id if id.starts_with("tunnel:") => TrayAction::Toggle(TunnelId(id[7..].to_owned())),
-                _ => return,
+            let Some(action) = menu_action(event.id().0.as_str()) else {
+                return;
             };
             let _ = menu_sender.try_send(action);
         }));
@@ -127,15 +120,28 @@ impl TrayController {
             .map_err(|error| error.to_string())?;
         menu.append(&PredefinedMenuItem::separator())
             .map_err(|error| error.to_string())?;
-        for (id, name, active) in &presentation.tunnels {
-            let marker = if *active { "●" } else { "○" };
+        for (id, name, actions) in &presentation.tunnels {
+            let (label, action_id) = match actions.primary {
+                TunnelAction::Start => ("Start", "start"),
+                TunnelAction::Stop => ("Stop", "stop"),
+                TunnelAction::Retry => ("Retry", "retry"),
+            };
             menu.append(&MenuItem::with_id(
-                format!("tunnel:{}", id.0),
-                format!("{name}   {marker}"),
+                format!("tunnel:{action_id}:{}", id.0),
+                format!("{name}   {label}"),
                 true,
                 None,
             ))
             .map_err(|error| error.to_string())?;
+            if actions.primary == TunnelAction::Retry && actions.can_stop {
+                menu.append(&MenuItem::with_id(
+                    format!("tunnel:stop:{}", id.0),
+                    format!("{name}   Stop"),
+                    true,
+                    None,
+                ))
+                .map_err(|error| error.to_string())?;
+            }
         }
         if presentation.remaining > 0 {
             menu.append(&MenuItem::new(
@@ -164,6 +170,46 @@ impl TrayController {
             .map_err(|error| error.to_string())?;
         self.presentation = Some(presentation);
         Ok(())
+    }
+}
+
+fn menu_action(id: &str) -> Option<TrayAction> {
+    match id {
+        "open" => Some(TrayAction::Open),
+        "start-all" => Some(TrayAction::StartAll),
+        "stop-all" => Some(TrayAction::StopAll),
+        "quit" => Some(TrayAction::Quit),
+        _ => {
+            for (prefix, action) in [
+                ("tunnel:start:", TunnelAction::Start),
+                ("tunnel:stop:", TunnelAction::Stop),
+                ("tunnel:retry:", TunnelAction::Retry),
+            ] {
+                if let Some(tunnel_id) = id.strip_prefix(prefix)
+                    && !tunnel_id.is_empty()
+                {
+                    return Some(TrayAction::Tunnel(TunnelId(tunnel_id.into()), action));
+                }
+            }
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocked_menu_entries_dispatch_distinct_retry_and_stop_actions() {
+        assert!(matches!(
+            menu_action("tunnel:retry:demo"),
+            Some(TrayAction::Tunnel(TunnelId(id), TunnelAction::Retry)) if id == "demo"
+        ));
+        assert!(matches!(
+            menu_action("tunnel:stop:demo"),
+            Some(TrayAction::Tunnel(TunnelId(id), TunnelAction::Stop)) if id == "demo"
+        ));
     }
 }
 
