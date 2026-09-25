@@ -12,12 +12,21 @@ use russh::{
     keys::{HashAlg, PublicKeyOrCertificate, known_hosts},
 };
 use thiserror::Error;
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::{
+    sync::{Mutex, mpsc, oneshot},
+    time::Instant,
+};
 use tunnel_domain::{HostKeyPolicy, RemoteEndpoint};
 
 use crate::DirectTcpStream;
 
 const MAX_KNOWN_HOSTS_BYTES: u64 = 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ApprovalPhase {
+    Waiting { at: Instant },
+    Resolved { at: Instant },
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum HostKeyDecision {
@@ -86,6 +95,7 @@ pub(crate) struct HostKeyVerifier {
     pub(crate) paths: Vec<PathBuf>,
     pub(crate) policy: HostKeyPolicy,
     pub(crate) approval: Option<HostKeyApproval>,
+    pub(crate) approval_phase: mpsc::Sender<ApprovalPhase>,
     pub(crate) forwarded: Option<(
         RemoteEndpoint,
         mpsc::Sender<DirectTcpStream>,
@@ -205,65 +215,76 @@ impl client::Handler for HostKeyVerifier {
                 host: self.host.clone(),
                 port: self.port,
             })?;
-        match answer.await.unwrap_or(HostKeyDecision::Cancel) {
-            HostKeyDecision::TrustOnce => Ok(true),
-            HostKeyDecision::TrustAndSave => {
-                let _guard = approval.save_lock.lock().await;
-                let path = approval.save_path.clone();
-                let paths = self.paths.clone();
-                let host = self.host.clone();
-                let port = self.port;
-                let key = key.clone();
-                tokio::task::spawn_blocking(move || {
-                    for known_path in &paths {
-                        let metadata = match fs::metadata(known_path) {
-                            Ok(metadata) => metadata,
-                            Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
-                            Err(source) => {
-                                return Err(HostKeyError::KnownHostsIo {
+        let _ = self
+            .approval_phase
+            .try_send(ApprovalPhase::Waiting { at: Instant::now() });
+        let result = async {
+            match answer.await.unwrap_or(HostKeyDecision::Cancel) {
+                HostKeyDecision::TrustOnce => Ok(true),
+                HostKeyDecision::TrustAndSave => {
+                    let _guard = approval.save_lock.lock().await;
+                    let path = approval.save_path.clone();
+                    let paths = self.paths.clone();
+                    let host = self.host.clone();
+                    let port = self.port;
+                    let key = key.clone();
+                    tokio::task::spawn_blocking(move || {
+                        for known_path in &paths {
+                            let metadata = match fs::metadata(known_path) {
+                                Ok(metadata) => metadata,
+                                Err(source) if source.kind() == io::ErrorKind::NotFound => continue,
+                                Err(source) => {
+                                    return Err(HostKeyError::KnownHostsIo {
+                                        path: known_path.clone(),
+                                        source,
+                                    });
+                                }
+                            };
+                            if metadata.len() > MAX_KNOWN_HOSTS_BYTES {
+                                return Err(HostKeyError::KnownHostsTooLarge {
                                     path: known_path.clone(),
-                                    source,
                                 });
                             }
-                        };
-                        if metadata.len() > MAX_KNOWN_HOSTS_BYTES {
-                            return Err(HostKeyError::KnownHostsTooLarge {
-                                path: known_path.clone(),
-                            });
+                            match known_hosts::check_known_hosts_path(&host, port, &key, known_path)
+                            {
+                                Ok(true) => return Ok(()),
+                                Ok(false) => {}
+                                Err(russh::keys::Error::KeyChanged { line }) => {
+                                    return Err(HostKeyError::Changed {
+                                        host,
+                                        port,
+                                        path: known_path.clone(),
+                                        line,
+                                    });
+                                }
+                                Err(source) => {
+                                    return Err(HostKeyError::InvalidKnownHosts {
+                                        path: known_path.clone(),
+                                        source,
+                                    });
+                                }
+                            }
                         }
-                        match known_hosts::check_known_hosts_path(&host, port, &key, known_path) {
-                            Ok(true) => return Ok(()),
-                            Ok(false) => {}
-                            Err(russh::keys::Error::KeyChanged { line }) => {
-                                return Err(HostKeyError::Changed {
-                                    host,
-                                    port,
-                                    path: known_path.clone(),
-                                    line,
-                                });
-                            }
-                            Err(source) => {
-                                return Err(HostKeyError::InvalidKnownHosts {
-                                    path: known_path.clone(),
-                                    source,
-                                });
-                            }
-                        }
-                    }
-                    known_hosts::learn_known_hosts_path(&host, port, &key, &path)
-                        .map_err(|source| HostKeyError::InvalidKnownHosts { path, source })
-                })
-                .await
-                .map_err(|error| HostKeyError::KnownHostsIo {
-                    path: approval.save_path.clone(),
-                    source: io::Error::other(error),
-                })??;
-                Ok(true)
+                        known_hosts::learn_known_hosts_path(&host, port, &key, &path)
+                            .map_err(|source| HostKeyError::InvalidKnownHosts { path, source })
+                    })
+                    .await
+                    .map_err(|error| HostKeyError::KnownHostsIo {
+                        path: approval.save_path.clone(),
+                        source: io::Error::other(error),
+                    })??;
+                    Ok(true)
+                }
+                HostKeyDecision::Cancel => Err(HostKeyError::Declined {
+                    host: self.host.clone(),
+                    port: self.port,
+                }),
             }
-            HostKeyDecision::Cancel => Err(HostKeyError::Declined {
-                host: self.host.clone(),
-                port: self.port,
-            }),
         }
+        .await;
+        let _ = self
+            .approval_phase
+            .try_send(ApprovalPhase::Resolved { at: Instant::now() });
+        result
     }
 }

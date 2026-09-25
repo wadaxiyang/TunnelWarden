@@ -25,7 +25,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite},
     net::TcpStream,
     sync::mpsc,
-    time::{timeout, timeout_at},
+    time::{sleep_until, timeout, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 use tunnel_domain::{
@@ -36,7 +36,7 @@ use zeroize::Zeroizing;
 use crate::{
     DirectTcpStream,
     cancellable_stream::CancellableStream,
-    host_key::{HostKeyApproval, HostKeyError, HostKeyVerifier},
+    host_key::{ApprovalPhase, HostKeyApproval, HostKeyError, HostKeyVerifier},
 };
 
 const MAX_KNOWN_HOSTS_PATHS: usize = 2;
@@ -503,23 +503,45 @@ impl DirectSshSession {
         } else {
             (None, None, None)
         };
+        let (approval_phase, mut approval_events) = mpsc::channel(2);
         let verifier = HostKeyVerifier {
             host: host.hostname.clone(),
             port: host.port,
             paths: known_hosts_paths.to_vec(),
             policy: host.host_key_policy,
             approval: approval.clone(),
+            approval_phase,
             forwarded: forwarded_sender,
         };
         let transport = CancellableStream::new(stream, cancellation.clone());
-        let handshake = tokio::select! {
-            biased;
-            _ = cancellation.cancelled() => Err(SshConnectError::Cancelled),
-            result = timeout_at(if approval.is_some() { deadline.max(tokio::time::Instant::now() + Duration::from_secs(120)) } else { deadline }, client::connect_stream(config, transport, verifier)) => {
-                match result {
-                    Ok(Ok(handle)) => Ok(handle),
-                    Ok(Err(source)) => Err(SshConnectError::Handshake(source)),
-                    Err(_) => Err(SshConnectError::Timeout("SSH handshake")),
+        let connect = client::connect_stream(config, transport, verifier);
+        tokio::pin!(connect);
+        let mut phase_deadline = deadline;
+        let mut network_remaining = None;
+        let mut approval_events_open = true;
+        let handshake = loop {
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => break Err(SshConnectError::Cancelled),
+                result = &mut connect => break result.map_err(SshConnectError::Handshake),
+                phase = approval_events.recv(), if approval_events_open => match phase {
+                    Some(ApprovalPhase::Waiting { at }) => {
+                        if at >= deadline {
+                            break Err(SshConnectError::Timeout("SSH handshake"));
+                        }
+                        network_remaining = Some(deadline.saturating_duration_since(at));
+                        phase_deadline = at + Duration::from_secs(120);
+                    }
+                    Some(ApprovalPhase::Resolved { at }) => {
+                        if let Some(remaining) = network_remaining.take() {
+                            phase_deadline = at + remaining;
+                        }
+                    }
+                    None => approval_events_open = false,
+                },
+                _ = sleep_until(phase_deadline) => {
+                    let phase = if network_remaining.is_some() { "host key approval" } else { "SSH handshake" };
+                    break Err(SshConnectError::Timeout(phase));
                 }
             }
         };

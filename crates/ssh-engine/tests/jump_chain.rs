@@ -199,6 +199,58 @@ async fn unknown_key_requires_explicit_approval_and_saves_app_known_hosts() {
 }
 
 #[tokio::test]
+async fn silent_server_uses_network_timeout_even_when_approval_is_available() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("silent server listener");
+    let address = listener.local_addr().expect("silent server address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept client");
+        let mut bytes = [0u8; 256];
+        while let Ok(count) = socket.read(&mut bytes).await {
+            if count == 0 {
+                break;
+            }
+        }
+    });
+    let directory = TempDir::new().expect("temporary directory");
+    let (prompts, mut requests) = mpsc::channel(1);
+    let approval = HostKeyApproval {
+        prompts,
+        save_path: directory.path().join("known_hosts"),
+        save_lock: Arc::new(Mutex::new(())),
+    };
+    let mut target = host("silent", address);
+    target.connect_timeout = Duration::from_millis(200);
+    let cancellation = CancellationToken::new();
+    let result = timeout(
+        Duration::from_secs(2),
+        SshChain::connect_with_approval(
+            vec![HopSpec {
+                host: target,
+                credential: SshCredential::Password(Zeroizing::new("secret".into())),
+                known_hosts_paths: Vec::new(),
+            }],
+            None,
+            &cancellation,
+            Some(approval),
+        ),
+    )
+    .await
+    .expect("network timeout must not become a 120-second prompt wait");
+    let error = match result {
+        Ok(_) => panic!("silent server cannot authenticate"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("timed out during SSH handshake"));
+    assert!(requests.try_recv().is_err());
+    timeout(Duration::from_secs(2), server)
+        .await
+        .expect("server observed disconnected client")
+        .expect("server task");
+}
+
+#[tokio::test]
 async fn second_ssh_handshake_and_forwarding_traverse_first_hop() {
     let (target_address, target_key, target_task) = start_server(TargetServer).await;
     let (relay_tx, mut relay_rx) = mpsc::channel(1);
