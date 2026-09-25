@@ -2573,7 +2573,7 @@ mod ui_tests {
                             source: LogSource::Tunnel,
                             subject: "alpha".into(),
                             stage: "Lifecycle",
-                            message: "Connected",
+                            message: "Connected".into(),
                         }),
                         Arc::new(LogEvent {
                             timestamp_unix: 1,
@@ -2581,7 +2581,7 @@ mod ui_tests {
                             source: LogSource::Host,
                             subject: "beta".into(),
                             stage: "Host key",
-                            message: "Confirmation required",
+                            message: "Confirmation required".into(),
                         }),
                     ]));
                     cx.notify();

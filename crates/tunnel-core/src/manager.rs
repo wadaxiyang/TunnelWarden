@@ -37,6 +37,7 @@ const STOP_DEADLINE: Duration = Duration::from_secs(3);
 const MAX_HOST_KEY_PROMPTS: usize = 16;
 const MAX_FILE_JOBS: usize = 4;
 const MAX_LOG_EVENTS: usize = 500;
+const MAX_LOG_TEXT_CHARS: usize = 256;
 
 /// Blocking OS credential-store access. The manager always invokes this on a
 /// Tokio blocking worker and never retains plaintext beyond one SSH attempt.
@@ -73,7 +74,7 @@ pub struct LogEvent {
     pub source: LogSource,
     pub subject: String,
     pub stage: &'static str,
-    pub message: &'static str,
+    pub message: Arc<str>,
 }
 
 pub type LogSnapshot = VecDeque<Arc<LogEvent>>;
@@ -921,7 +922,7 @@ impl TunnelManager {
             if active.state.has_changed().unwrap_or(false) {
                 let state = active.state.borrow_and_update().clone();
                 if let Some(view) = self.current.get_mut(id) {
-                    if std::mem::discriminant(&view.state) != std::mem::discriminant(&state) {
+                    if loggable_state_changed(&view.state, &state) {
                         transitions.push((id.clone(), state.clone()));
                     }
                     view.state = state;
@@ -958,7 +959,7 @@ impl TunnelManager {
 
     fn set_state(&mut self, id: &TunnelId, state: SupervisorState, local_addr: Option<SocketAddr>) {
         if let Some(view) = self.current.get_mut(id) {
-            let changed = std::mem::discriminant(&view.state) != std::mem::discriminant(&state);
+            let changed = loggable_state_changed(&view.state, &state);
             *view = TunnelView { state, local_addr };
             if changed {
                 let state = self.current.get(id).map(|view| view.state.clone());
@@ -971,18 +972,48 @@ impl TunnelManager {
     }
 
     fn log_state(&mut self, id: &TunnelId, state: &SupervisorState) {
-        let (level, message) = match state {
-            SupervisorState::Stopped => (LogLevel::Info, "Stopped"),
-            SupervisorState::Connecting { .. } => (LogLevel::Info, "Connecting to SSH host"),
-            SupervisorState::Healthy { .. } => (LogLevel::Info, "SSH connection healthy"),
-            SupervisorState::Degraded { .. } => (LogLevel::Warning, "SSH connection degraded"),
-            SupervisorState::Reconnecting { .. } => (LogLevel::Warning, "Reconnecting"),
-            SupervisorState::Blocked { .. } => (
+        let (level, stage, message) = match state {
+            SupervisorState::Stopped => (LogLevel::Info, "Lifecycle", "Stopped".to_owned()),
+            SupervisorState::Connecting { attempt } => (
+                LogLevel::Info,
+                "SSH",
+                format!("Connecting, attempt {attempt}"),
+            ),
+            SupervisorState::Healthy { remote_port, .. } => (
+                LogLevel::Info,
+                "Health",
+                match remote_port {
+                    Some(port) => format!("SSH session healthy; remote port {port}"),
+                    None => "SSH session healthy".to_owned(),
+                },
+            ),
+            SupervisorState::Degraded {
+                failed_pings,
+                reason,
+            } => (
+                LogLevel::Warning,
+                "Health",
+                format!("Health degraded after {failed_pings} failed pings: {reason}"),
+            ),
+            SupervisorState::Reconnecting {
+                attempt,
+                delay,
+                reason,
+            } => (
+                LogLevel::Warning,
+                "Retry",
+                format!(
+                    "Reconnect attempt {attempt} in {} ms: {reason}",
+                    delay.as_millis()
+                ),
+            ),
+            SupervisorState::Blocked { reason } => (
                 LogLevel::Error,
-                "Tunnel blocked; inspect status for details",
+                "Lifecycle",
+                format!("Tunnel blocked: {reason}"),
             ),
         };
-        self.push_log(level, LogSource::Tunnel, id.0.clone(), "Lifecycle", message);
+        self.push_log(level, LogSource::Tunnel, id.0.clone(), stage, message);
     }
 
     fn push_log(
@@ -991,7 +1022,7 @@ impl TunnelManager {
         source: LogSource,
         subject: String,
         stage: &'static str,
-        message: &'static str,
+        message: impl AsRef<str>,
     ) {
         if self.logs.len() == MAX_LOG_EVENTS {
             self.logs.pop_front();
@@ -1003,9 +1034,9 @@ impl TunnelManager {
                 .as_secs(),
             level,
             source,
-            subject,
+            subject: bounded_log_text(&subject, MAX_LOG_TEXT_CHARS),
             stage,
-            message,
+            message: Arc::from(bounded_log_text(message.as_ref(), MAX_LOG_TEXT_CHARS)),
         }));
         self.log_views.send_replace(Arc::new(self.logs.clone()));
     }
@@ -1013,6 +1044,62 @@ impl TunnelManager {
     fn publish(&self) {
         self.snapshots.send_replace(Arc::new(self.current.clone()));
     }
+}
+
+fn loggable_state_changed(old: &SupervisorState, new: &SupervisorState) -> bool {
+    match (old, new) {
+        (SupervisorState::Stopped, SupervisorState::Stopped)
+        | (SupervisorState::Healthy { .. }, SupervisorState::Healthy { .. }) => false,
+        (
+            SupervisorState::Connecting { attempt: old },
+            SupervisorState::Connecting { attempt: new },
+        ) => old != new,
+        (
+            SupervisorState::Reconnecting {
+                attempt: old_attempt,
+                delay: old_delay,
+                reason: old_reason,
+            },
+            SupervisorState::Reconnecting {
+                attempt: new_attempt,
+                delay: new_delay,
+                reason: new_reason,
+            },
+        ) => old_attempt != new_attempt || old_delay != new_delay || old_reason != new_reason,
+        (
+            SupervisorState::Degraded {
+                failed_pings: old_pings,
+                reason: old_reason,
+            },
+            SupervisorState::Degraded {
+                failed_pings: new_pings,
+                reason: new_reason,
+            },
+        ) => old_pings != new_pings || old_reason != new_reason,
+        (SupervisorState::Blocked { reason: old }, SupervisorState::Blocked { reason: new }) => {
+            old != new
+        }
+        _ => true,
+    }
+}
+
+fn bounded_log_text(input: &str, limit: usize) -> String {
+    let mut chars = input.chars();
+    let mut output: String = chars
+        .by_ref()
+        .take(limit)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    if chars.next().is_some() {
+        output.push('…');
+    }
+    output
 }
 
 async fn build_hops(
@@ -1438,6 +1525,39 @@ mod config_tests {
             snapshot.back().expect("newest event").subject,
             MAX_LOG_EVENTS.to_string()
         );
+    }
+
+    #[test]
+    fn repeated_blocked_states_keep_distinct_bounded_reasons() {
+        let tunnel = test_tunnel("127.0.0.1", 1080);
+        let (mut manager, handle) = TunnelManager::new(
+            vec![test_host()],
+            Vec::new(),
+            vec![tunnel.clone()],
+            Arc::new(EmptyCredentials),
+        )
+        .expect("manager");
+        manager.set_state(
+            &tunnel.id,
+            SupervisorState::Blocked {
+                reason: "host key rejected".into(),
+            },
+            None,
+        );
+        manager.set_state(
+            &tunnel.id,
+            SupervisorState::Blocked {
+                reason: format!("authentication\n{}", "x".repeat(500)),
+            },
+            None,
+        );
+        let logs = handle.subscribe_logs();
+        let snapshot = logs.borrow();
+        assert_eq!(snapshot.len(), 2);
+        assert!(snapshot[0].message.contains("host key rejected"));
+        assert!(snapshot[1].message.contains("authentication "));
+        assert!(!snapshot[1].message.contains('\n'));
+        assert!(snapshot[1].message.chars().count() <= MAX_LOG_TEXT_CHARS + 1);
     }
 
     #[test]
