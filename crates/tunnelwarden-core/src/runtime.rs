@@ -280,6 +280,15 @@ impl RuntimeState {
     }
     fn stop_port_forward(&mut self, id: Uuid, reply: Reply) -> Task<Message> {
         self.port_forward_starting.remove(&id);
+        // TunnelWarden edit adapter (2026-09-29): a stopped rule can be saved
+        // with another host before this dial completes. Withdraw its queued
+        // host association too, so the old connection cannot attach the edited
+        // rule. A fresh Start queues its intent on the current host normally.
+        for connection in self.forward_conns.values_mut() {
+            if let PfHostConn::Connecting { pending } = connection {
+                pending.retain(|rule| *rule != id);
+            }
+        }
         if let Some(rule) = self.port_forward_rules.iter().find(|r| r.id == id) {
             let host_id = rule.host_id;
             if !self
@@ -887,6 +896,30 @@ mod tests {
         assert!(state.errors.is_empty());
         assert!(state.port_forward_retry.is_empty());
         assert!(!state.start_port_forward(r.id, false).0.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stop_then_change_host_withdraws_old_dial_association() {
+        use super::*;
+        use oryxis_core::models::port_forward_rule::ForwardKind;
+        let r = PortForwardRule::new("edit while dialing", ForwardKind::Local, Uuid::new_v4());
+        let mut state = RuntimeState::new(Arc::new(RejectDialer), vec![r.clone()], true);
+        let old_dial = state.start_port_forward(r.id, false);
+        let (tx, rx) = oneshot::channel();
+        state.stop_port_forward(r.id, tx);
+        assert!(rx.await.unwrap().is_ok());
+        let Some(PfHostConn::Connecting { pending }) = state.forward_conns.get(&r.host_id) else {
+            panic!("old dial remains in flight")
+        };
+        assert!(pending.is_empty());
+        state.port_forward_rules[0].host_id = Uuid::new_v4();
+        let _new_dial = state.start_port_forward(r.id, false);
+        for future in old_dial.0 {
+            assert!(state.handle_message(future.await).0.is_empty());
+        }
+        assert!(state.port_forward_starting.contains(&r.id));
+        assert!(state.errors.is_empty());
+        assert_eq!(state.forward_conns.len(), 1);
     }
 
     #[test]

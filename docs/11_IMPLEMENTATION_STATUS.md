@@ -132,7 +132,7 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
 - Closed an IPC scheduling race: queued dial failures use the existing Stop
   completion barrier, so old failures cannot consume a newly restarted intent.
   Added a regression test; upstream SSH and retry semantics remain unchanged.
-- Full local gates: 14 unit and 9 real SSH integration tests, none ignored;
+- Full local gates: 15 unit and 9 real SSH integration tests, none ignored;
   fmt/check/test/clippy and architectural boundary check; Svelte zero errors/
   warnings and production frontend build.
 - Added Windows CI and tag/manual release workflows, pinned action revisions,
@@ -142,3 +142,6 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
   available; encrypted keys require an external agent. No scope expansion.
 - Publication is complete only when the tag workflow publishes actual assets;
   GitHub Actions and the v0.1.0 release provide the durable publication evidence.
+- Final review also covered stopping a dial and changing its rule's host before
+  completion: the stopped ID is removed from pending queues so the old host
+  cannot attach a newly edited rule. Added a regression test and reran gates.

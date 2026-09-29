@@ -82,6 +82,9 @@ so its added-key count is zero. Stop IPC waits for a pending attach to finish
 cancelling before acknowledging; this also serializes immediate Stop/Start
 without adding generations. The same IPC barrier covers queued dial failures
 before Stop/Start (2026-09-29); tests cover both late completion cases.
+Stopping also withdraws the ID from pending host queues, so saving that rule
+with a different host cannot reuse the old host's late connection. This is an
+application editing requirement; fresh starts use the unchanged upstream queue.
 
 ## G. Connection adapter (2026-09-29)
 
