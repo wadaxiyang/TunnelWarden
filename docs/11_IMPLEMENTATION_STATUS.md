@@ -36,3 +36,17 @@ transport, SOCKS server, channel bridge or reconnect supervisor will be added.
 
 Each phase records its checks here before its commit is pushed. Git history is
 the authoritative phase commit ledger (a commit cannot embed its own SHA).
+
+## Phase 1 — passed on Windows, 2026-09-29
+
+- Three executable integration tests (none ignored) use fresh loopback SSH
+  servers: password/private-key auth, all forwarding modes on one connection,
+  byte transport, explicit cancel/rebind, rejected auth, unknown host key and
+  occupied listener errors. The fixture delegates server SSH to AsyncSSH.
+- `cargo fmt --all -- --check`, `cargo check --workspace`,
+  `cargo test --workspace`, `cargo clippy --workspace --all-targets -- -D warnings`
+  and boundary checks all passed. Scaffold Vite build also passed.
+- Python 3 + `pip install -r tests/requirements.txt` are test prerequisites.
+- Added a generated application icon because Tauri's workspace build embeds it.
+- Source-only upstream reference remains unchanged; the harness uses only
+  public Oryxis engine APIs.

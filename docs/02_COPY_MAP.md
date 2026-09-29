@@ -58,3 +58,11 @@ Do **not** alter the forwarding lifecycle at the same time as removing iced. Get
 ## D. Do not copy
 
 Oryxis terminal, SFTP, X11, remote-desktop launcher, cloud, sync, AI, plugin, iced view hierarchy, or unrelated application state.
+
+## E. Test provenance
+
+- `crates/tunnelwarden-core/tests/forwarding.rs`: adapted from pinned
+  `crates/oryxis-ssh/tests/ssh_integration.rs` local/shared/remote/dynamic tests.
+  Modification date: 2026-09-29. Replaced Docker setup with a loopback AsyncSSH
+  fixture; retained public engine calls, tunneled banner assertions, SOCKS client
+  handshake and explicit cancellation. Added same-connection remote rebind.

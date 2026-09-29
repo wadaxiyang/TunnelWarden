@@ -5,3 +5,7 @@ target/
 .DS_Store
 *.log
 src-tauri/gen/
+# Generated mobile icon variants are outside the Windows release scope.
+src-tauri/icons/android/
+src-tauri/icons/ios/
+__pycache__/
