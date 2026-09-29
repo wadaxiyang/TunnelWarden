@@ -50,3 +50,17 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
 - Added a generated application icon because Tauri's workspace build embeds it.
 - Source-only upstream reference remains unchanged; the harness uses only
   public Oryxis engine APIs.
+
+## Phase 2 — passed on Windows, 2026-09-29
+
+- Ported the standalone runtime with traceable source comments and Copy Map.
+  Copied helpers retain their original comments and tests. Tokio executes the
+  task/result flow; Oryxis still owns every network operation.
+- Preserved host connection sharing, in-flight queue, explicit remote cancel,
+  late-stop guards, liveness, auto-start, retry gates and agent census kicks.
+- Added only Stop IPC completion bookkeeping to keep Stop/Start ordered while
+  a remote attach is in flight. No generation/attempt supervisor was added.
+- All four required Cargo checks and boundary checks passed: 9 unit tests and
+  5 real SSH integration tests, none ignored. The tests include virtual-time
+  retry deadlines, late attach failure, shared connection call count, remote
+  delete/rebind, launch auto-start and connection drop into retry.

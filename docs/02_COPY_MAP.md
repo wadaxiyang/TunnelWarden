@@ -66,3 +66,18 @@ Oryxis terminal, SFTP, X11, remote-desktop launcher, cloud, sync, AI, plugin, ic
   Modification date: 2026-09-29. Replaced Docker setup with a loopback AsyncSSH
   fixture; retained public engine calls, tunneled banner assertions, SOCKS client
   handshake and explicit cancellation. Added same-connection remote rebind.
+
+## F. Implemented runtime port (2026-09-29)
+
+`crates/tunnelwarden-core/src/runtime.rs` copies/adapts the B-section symbols
+from `dispatch_port_forwards.rs`, including agent census acceleration and the
+upstream helper tests. Runtime fields/initialization follow `app.rs` and
+`boot/mod.rs`; timers follow `subscription.rs`; completions follow
+`messages/port_forward.rs`. All at the pinned SHA above.
+
+Changes: iced tasks are collections of Tokio futures; the engine dial is an
+application adapter; errors are per-rule; monotonic time uses Tokio Instant
+(same behavior, controllable in tests). No internal agent server is exposed,
+so its added-key count is zero. Stop IPC waits for a pending attach to finish
+cancelling before acknowledging; this also serializes immediate Stop/Start
+without adding generations. Tests cover a late attach error after Stop.
