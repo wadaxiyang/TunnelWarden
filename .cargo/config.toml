@@ -1,0 +1,5 @@
+[env]
+# aws-lc ships vetted x64 Windows assembly objects for hosts without NASM.
+AWS_LC_SYS_PREBUILT_NASM = "1"
+# Upstream C sources contain Unicode comments; do not use Windows' ANSI page.
+CFLAGS_x86_64_pc_windows_msvc = "/utf-8"
