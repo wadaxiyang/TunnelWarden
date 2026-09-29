@@ -125,7 +125,7 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
   Native Windows automation confirmed Close removes the window while the process
   remains alive; relaunch focuses the original PID. Normal quit exits it.
 
-## Phase 7 — acceptance and release preparation, 2026-09-29
+## Phase 7 — passed and released, 2026-09-29
 
 - Completed target-OS matrix evidence in docs/12_VALIDATION.md, including actual
   external agent discovery/authentication through Oryxis on Windows.
@@ -145,3 +145,34 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
 - Final review also covered stopping a dial and changing its rule's host before
   completion: the stopped ID is removed from pending queues so the old host
   cannot attach a newly edited rule. Added a regression test and reran gates.
+
+### Publication receipt
+
+- Release: https://github.com/wadaxiyang/TunnelWarden/releases/tag/v0.1.0
+- Published: 2026-09-29 15:56:17 UTC (23:56:17 Asia/Shanghai).
+- Release source/tag commit: `6cebb10d0106bfaf274189dd48126d69478d63f1`.
+- CI: https://github.com/wadaxiyang/TunnelWarden/actions/runs/36589328498 — success.
+- Windows Release: https://github.com/wadaxiyang/TunnelWarden/actions/runs/36589334135 — success.
+- Both remote runs passed 15 unit + 9 SSH integration tests, all Rust gates,
+  frontend checks and build. Release produced two bundles; NSIS install,
+  installed-resource checks and uninstall commands completed successfully.
+- Published NSIS EXE: 4,349,774 bytes; MSI: 6,529,024 bytes. Release also contains
+  application source ZIP, LICENSE, NOTICE.ORYXIS, third-party notices/licenses
+  and SHA256SUMS.txt. All seven listed file hashes match GitHub asset digests.
+- This post-publication documentation receipt does not change the release code.
+  Its docs-only commit skips redundant CI; the tag continues to identify the
+  exact source verified and built by both successful workflows above.
+
+### Phase commit ledger
+
+| Phase | Commit |
+| --- | --- |
+| 0 — upstream | `07ed15e72cfd4063d8b16b8a9963045300052e15` |
+| 1 — harness | `6aecff3ef465b2abcc1ffc8a2e83934ff3b39f4a` |
+| 2 — runtime port | `5558bfafa607b71167a2e549c87b1a0425d854a6` |
+| 3 — persistence | `02fb87112266044d672838ecd2c3af337177cbe7` |
+| 4 — IPC | `1e2b650fe35d5dad4aee999b33ac7ee207b3d643` |
+| 5 — UI | `560dffd081094fdac3c7cc49ffd3e713dcde2f26` |
+| 6 — desktop shell | `d5457a4cf8d44c4e4c9995a4df4c6ad379add402` |
+| 7 — acceptance/release | `5d6d1c9df8a33df949dfeaf5fd5804b81046550a` |
+| Final runtime regression fix | `6cebb10d0106bfaf274189dd48126d69478d63f1` |
