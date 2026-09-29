@@ -24,7 +24,7 @@ starting set, retry gates, agent census and late completion checks.
 Persistence, IPC and OS credential storage are application adapters. No SSH
 transport, SOCKS server, channel bridge or reconnect supervisor will be added.
 
-## Remaining phases
+## Phase sequence (completed records below)
 
 1. Public API forwarding harness.
 2. Port standalone runtime.
@@ -124,3 +124,21 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
   Repeated the real WebView smoke suite successfully with all shell plugins.
   Native Windows automation confirmed Close removes the window while the process
   remains alive; relaunch focuses the original PID. Normal quit exits it.
+
+## Phase 7 — acceptance and release preparation, 2026-09-29
+
+- Completed target-OS matrix evidence in docs/12_VALIDATION.md, including actual
+  external agent discovery/authentication through Oryxis on Windows.
+- Closed an IPC scheduling race: queued dial failures use the existing Stop
+  completion barrier, so old failures cannot consume a newly restarted intent.
+  Added a regression test; upstream SSH and retry semantics remain unchanged.
+- Full local gates: 14 unit and 9 real SSH integration tests, none ignored;
+  fmt/check/test/clippy and architectural boundary check; Svelte zero errors/
+  warnings and production frontend build.
+- Added Windows CI and tag/manual release workflows, pinned action revisions,
+  lockfile builds, version/upstream guards, EXE/MSI packaging, per-user NSIS
+  install/uninstall verification, bundled dependency licenses and SHA-256 hashes.
+- Updated user/build instructions and release notes. Signed binaries are not
+  available; encrypted keys require an external agent. No scope expansion.
+- Publication is complete only when the tag workflow publishes actual assets;
+  GitHub Actions and the v0.1.0 release provide the durable publication evidence.

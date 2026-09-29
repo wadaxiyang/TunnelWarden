@@ -487,10 +487,17 @@ impl RuntimeState {
                 // mid-dial already left `port_forward_starting`, and
                 // handing it a failure now would re-arm the retry ladder
                 // the stop just cleared.
+                let due: Vec<_> = pending
+                    .into_iter()
+                    .filter(|rid| self.port_forward_starting.contains(rid))
+                    .collect();
+                // TunnelWarden IPC adaptation (2026-09-29): queued failures
+                // must settle before Stop/Start too, or an old Started(Err)
+                // could consume the new intent. Same barrier as attachment;
+                // upstream error/retry handling is unchanged.
+                self.attaching.extend(due.iter().copied());
                 Task::batch(
-                    pending
-                        .into_iter()
-                        .filter(|rid| self.port_forward_starting.contains(rid))
+                    due.into_iter()
                         .map(|rid| Task::done(Message::Started(rid, Err(e.clone())))),
                 )
             }
@@ -853,6 +860,33 @@ mod tests {
             agents: agents.iter().map(|s| s.to_string()).collect(),
             added_keys,
         }
+    }
+
+    #[tokio::test]
+    async fn queued_dial_failure_cannot_overtake_stop_then_restart() {
+        use super::*;
+        use oryxis_core::models::port_forward_rule::ForwardKind;
+        let r = PortForwardRule::new("dial race", ForwardKind::Local, Uuid::new_v4());
+        let mut state = RuntimeState::new(Arc::new(RejectDialer), vec![r.clone()], true);
+        state.port_forward_starting.insert(r.id);
+        state.forward_conns.insert(
+            r.host_id,
+            PfHostConn::Connecting {
+                pending: vec![r.id],
+            },
+        );
+        let queued = state.handle_message(Message::ConnReady(r.host_id, Err("old dial".into())));
+        let (tx, mut rx) = oneshot::channel();
+        state.stop_port_forward(r.id, tx);
+        assert!(rx.try_recv().is_err());
+        assert!(state.start_port_forward(r.id, false).0.is_empty());
+        for future in queued.0 {
+            state.handle_message(future.await);
+        }
+        assert!(rx.await.unwrap().is_ok());
+        assert!(state.errors.is_empty());
+        assert!(state.port_forward_retry.is_empty());
+        assert!(!state.start_port_forward(r.id, false).0.is_empty());
     }
 
     #[test]

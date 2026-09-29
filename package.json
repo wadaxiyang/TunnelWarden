@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
+    "licenses": "node scripts/licenses.mjs",
+    "bundle": "tauri build --bundles nsis,msi -- --locked",
     "dev": "vite --port 1420",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",

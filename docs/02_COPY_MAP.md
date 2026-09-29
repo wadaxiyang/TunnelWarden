@@ -80,7 +80,8 @@ application adapter; errors are per-rule; monotonic time uses Tokio Instant
 (same behavior, controllable in tests). No internal agent server is exposed,
 so its added-key count is zero. Stop IPC waits for a pending attach to finish
 cancelling before acknowledging; this also serializes immediate Stop/Start
-without adding generations. Tests cover a late attach error after Stop.
+without adding generations. The same IPC barrier covers queued dial failures
+before Stop/Start (2026-09-29); tests cover both late completion cases.
 
 ## G. Connection adapter (2026-09-29)
 

@@ -9,3 +9,5 @@ src-tauri/gen/
 src-tauri/icons/android/
 src-tauri/icons/ios/
 __pycache__/
+THIRD_PARTY_LICENSES.txt
+release-assets/

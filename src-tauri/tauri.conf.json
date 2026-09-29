@@ -25,5 +25,24 @@
       "devCsp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://localhost:1420 ws://localhost:1420; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'"
     }
   },
-  "bundle": { "active": true, "targets": "all" }
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "publisher": "TunnelWarden contributors",
+    "shortDescription": "Desktop SSH tunnel manager powered by Oryxis",
+    "license": "AGPL-3.0-or-later",
+    "licenseFile": "../LICENSE",
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "resources": {
+      "../LICENSE": "LICENSE",
+      "../NOTICE.ORYXIS": "NOTICE.ORYXIS",
+      "../THIRD_PARTY_NOTICES.md": "THIRD_PARTY_NOTICES.md",
+      "../THIRD_PARTY_LICENSES.txt": "THIRD_PARTY_LICENSES.txt",
+      "../README.md": "README.md"
+    },
+    "windows": {
+      "nsis": { "installMode": "currentUser" },
+      "wix": { "language": "en-US" }
+    }
+  }
 }

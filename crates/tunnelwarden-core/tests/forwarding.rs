@@ -5,6 +5,9 @@
 // Source: crates/oryxis-ssh/tests/ssh_integration.rs
 // Oryxis 16ad2af83b424780ff60b6420a6c20a3b30c7143.
 mod common;
+#[cfg(windows)]
+#[path = "../../../tests/windows_agent.rs"]
+mod windows_agent;
 use common::*;
 use oryxis_core::models::known_host::KnownHost;
 use oryxis_core::models::{connection::AuthMethod, port_forward_rule::ForwardKind};
@@ -148,6 +151,26 @@ async fn private_key_auth_uses_upstream_engine() {
             &r,
             None,
         )
+        .await
+        .unwrap();
+    let mut stream = TcpStream::connect(("127.0.0.1", r.listen_port))
+        .await
+        .unwrap();
+    banner(&mut stream).await;
+    session.cancel().await;
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn windows_agent_auth_uses_upstream_discovery_and_signing() {
+    let fixture = Fixture::start();
+    let _agent = windows_agent::AgentFixture::start(&fixture.info.private_key).await;
+    let mut c = fixture.connection();
+    c.auth_method = AuthMethod::Agent;
+    let r = rule(&c, ForwardKind::Local).await;
+    let session = fixture
+        .engine()
+        .connect_forward(&c, None, None, &r, None)
         .await
         .unwrap();
     let mut stream = TcpStream::connect(("127.0.0.1", r.listen_port))

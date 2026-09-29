@@ -1,4 +1,76 @@
-# TunnelWarden — Astra Development Scaffold
+# TunnelWarden 0.1.0
+
+## Install and use
+
+Download the Windows x64 NSIS setup EXE or MSI from
+[GitHub Releases](https://github.com/wadaxiyang/TunnelWarden/releases).
+NSIS installs for the current user. The installer downloads Microsoft WebView2
+when absent. This initial release is unsigned.
+
+1. Add a profile in **SSH Hosts**, including its independent SSH server port.
+   Passwords use Windows Credential Manager; private keys stay in their files.
+   Agent uses external Windows OpenSSH/Pageant-compatible agents via Oryxis.
+   Jump routes list saved hosts in order, nearest hop first.
+2. Add a Local, Remote or Dynamic rule in **Tunnels**. Remote exposes a server
+   listener pointing back to a local target; Dynamic exposes a local SOCKS5 port.
+3. Start and verify the first-use fingerprint with the server administrator.
+   Running appears only after backend attachment succeeds.
+4. Stop releases listeners, including remote binds. Edit stops the old rule
+   before saving; Delete cancels before removing configuration.
+
+Auto-start applies at each application launch. Auto-reconnect uses Oryxis'
+15/30/60/120-second backoff and a 15-second retry tick (an attempt can occur one
+tick later). Manual Stop clears retries for the current run. Unattended starts
+refuse unknown/changed host keys; start manually to inspect and approve them.
+
+Close hides to tray when enabled. Tray offers Open, Start all, Stop all and Quit.
+Quit cancels tunnels before exit. Settings controls launch at login. A second
+launch focuses the existing instance. Tunnels require the app to remain running.
+
+## Data and limitations
+
+- Config/trusted fingerprints: `%APPDATA%\dev.tunnelwarden.app\config.json`.
+- Passwords: Windows Credential Manager, service `dev.tunnelwarden.app`.
+- Logs: `%LOCALAPPDATA%\dev.tunnelwarden.app\logs` (1 MB, three archives).
+- Transient runtime state is never persisted. Corrupt/future config fails closed
+  and remains untouched; back up the file before repairing it.
+- Encrypted key files require an external agent. No passphrase, certificate,
+  interactive OTP UI, terminal, SFTP or built-in agent is included.
+- Remote listeners remain subject to SSH server forwarding/GatewayPorts policy.
+- Windows x64 is the only packaged and validated target for 0.1.0.
+
+## Build and validate
+
+Windows prerequisites: Rust **1.94.1**, MSVC build tools/Windows SDK, Node.js
+**24**, npm, Python **3.13** and WebView2. The workspace enables aws-lc prebuilt
+NASM objects and UTF-8 C compilation; separate NASM is unnecessary.
+
+```powershell
+npm ci
+python -m pip install -r tests/requirements.txt
+./scripts/fetch-oryxis-reference.ps1
+npm run licenses
+./scripts/check.ps1 -Frontend
+npm run tauri -- dev
+# Release:
+npm run bundle
+```
+
+Tests use temporary loopback AsyncSSH servers and fresh keys. The Windows agent
+test uses a disposable pipe and russh's public server API; production auth uses
+Oryxis exclusively. Tests never modify the user's agent. The UI smoke suite uses
+a real isolated Tauri WebView; see `docs/12_VALIDATION.md`.
+
+CI runs all Rust/frontend gates on Windows. Tag releases repeat the gates, build
+both installers and verify NSIS installation/uninstallation on an ephemeral
+runner before publishing installers, source, notices and SHA-256 checksums.
+
+Licensed **AGPL-3.0-or-later**. Source and lockfiles accompany the release; the
+pinned upstream is available at
+[Oryxis](https://github.com/wilsonglasser/oryxis/tree/16ad2af83b424780ff60b6420a6c20a3b30c7143).
+`npm run licenses` collects dependency notices into `THIRD_PARTY_LICENSES.txt`,
+which is included in installers and release assets. Preserve LICENSE,
+NOTICE.ORYXIS and modification notices when redistributing.
 
 TunnelWarden is a small desktop SSH port-forward manager built around **Oryxis' existing SSH implementation**, not a new SSH implementation.
 
