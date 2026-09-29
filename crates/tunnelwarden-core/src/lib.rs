@@ -7,5 +7,7 @@
 pub mod credentials;
 pub mod dial;
 pub mod dto;
+pub mod logs;
 pub mod runtime;
+pub mod service;
 pub mod storage;

@@ -79,3 +79,14 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
 - All four Cargo gates plus boundary checks passed: 12 unit + 7 SSH integration
   tests, none ignored. Saving auto-start describes launch policy; a manual Stop
   suppresses retries during the current run, matching Oryxis.
+
+## Phase 4 — passed on Windows, 2026-09-29
+
+- Implemented every query/mutation in docs/06 through AppService and thin Tauri
+  commands, with runtime/log/host-key events. No engine handles cross IPC.
+- Added DTO validation, jump-reference/cycle validation, OS-secret rollback on
+  configuration write failure, reference-safe host deletion, and awaited tunnel
+  cancel before edit/delete. Host edits refuse live/pending dependent routes.
+- Headless service test exercises CRUD, validation, Start (not false-ready),
+  Stop, Restart, live remote Delete and reloading saved configuration.
+- All Cargo gates and boundary checks passed: 12 unit + 8 integration tests.

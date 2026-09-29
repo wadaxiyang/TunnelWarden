@@ -27,6 +27,10 @@ use tunnelwarden_core::{
     dto::TunnelStatus,
     runtime::{DialFuture, ForwardDialer, TunnelRuntimeManager},
 };
+use tunnelwarden_core::{
+    dto::{HostDto, SaveHost, TunnelDto},
+    service::AppService,
+};
 
 #[derive(Default)]
 struct TestSecrets(std::sync::Mutex<std::collections::HashMap<uuid::Uuid, String>>);
@@ -334,4 +338,103 @@ async fn manual_host_key_consent_persists_trust_and_unattended_unknown_keys_fail
         1
     );
     assert!(dialer.connect(host.id, true).await.is_ok());
+}
+
+#[tokio::test]
+async fn tauri_facing_service_crud_start_stop_restart_and_config_reload() {
+    let fixture = Fixture::start();
+    let c = fixture.connection();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("config.json");
+    let store = Arc::new(ConfigStore::open(&path).unwrap());
+    let secrets = Arc::new(TestSecrets::default());
+    let service = AppService::new(store.clone(), secrets.clone());
+    let h = HostDto {
+        id: c.id,
+        name: "SSH fixture".into(),
+        hostname: c.hostname.clone(),
+        ssh_port: c.port,
+        username: "tester".into(),
+        auth_method: AuthMethod::Password,
+        identity_file: String::new(),
+        jump_chain: vec![],
+        keepalive_seconds: 30,
+        has_password: false,
+    };
+    service
+        .save_host(SaveHost {
+            profile: h.clone(),
+            password: Some(PASSWORD.into()),
+            clear_password: false,
+        })
+        .await
+        .unwrap();
+    assert!(service.list_hosts().unwrap()[0].has_password);
+    let mut cycle = h.clone();
+    cycle.jump_chain.push(h.id);
+    assert!(
+        service
+            .save_host(SaveHost {
+                profile: cycle,
+                password: None,
+                clear_password: false
+            })
+            .await
+            .unwrap_err()
+            .contains("cycle")
+    );
+    store
+        .update(|c| {
+            c.known_hosts.push(KnownHost::new(
+                "127.0.0.1",
+                fixture.info.port,
+                "ssh-ed25519",
+                &fixture.info.fingerprint,
+            ));
+            Ok(())
+        })
+        .unwrap();
+    let r = rule(&c, ForwardKind::Remote).await;
+    let mut dto = TunnelDto {
+        id: r.id,
+        name: "remote".into(),
+        kind: r.kind,
+        host_id: c.id,
+        listen_address: r.listen_host.clone(),
+        listen_port: 0,
+        target_host: r.target_host.clone(),
+        target_port: r.target_port,
+        auto_start: false,
+    };
+    assert!(service.save_tunnel(dto.clone()).await.is_err());
+    dto.listen_port = r.listen_port;
+    service.save_tunnel(dto).await.unwrap();
+    assert!(service.delete_host(h.id).await.is_err());
+    service.start_tunnel(r.id).await.unwrap();
+    assert_ne!(
+        service.get_runtime_snapshot().tunnels[0].status,
+        TunnelStatus::Running
+    );
+    wait_status(&service.runtime, r.id, TunnelStatus::Running).await;
+    service.restart_tunnel(r.id).await.unwrap();
+    wait_status(&service.runtime, r.id, TunnelStatus::Running).await;
+    service.stop_tunnel(r.id).await.unwrap();
+    assert_released(r.listen_port).await;
+    service.runtime.shutdown().await.unwrap();
+    let saved = std::fs::read_to_string(&path).unwrap();
+    assert!(!saved.contains(PASSWORD));
+    let restored = AppService::new(Arc::new(ConfigStore::open(&path).unwrap()), secrets);
+    assert_eq!(restored.list_hosts().unwrap().len(), 1);
+    assert_eq!(
+        restored.get_runtime_snapshot().tunnels[0].status,
+        TunnelStatus::Stopped
+    );
+    restored.start_tunnel(r.id).await.unwrap();
+    wait_status(&restored.runtime, r.id, TunnelStatus::Running).await;
+    restored.delete_tunnel(r.id).await.unwrap();
+    assert_released(r.listen_port).await;
+    assert!(restored.list_tunnels().is_empty());
+    restored.delete_host(h.id).await.unwrap();
+    assert!(restored.list_hosts().unwrap().is_empty());
+    restored.runtime.shutdown().await.unwrap();
 }

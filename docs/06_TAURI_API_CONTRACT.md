@@ -49,3 +49,16 @@ next_retry_at?: timestamp
 ```
 
 The backend is authoritative. The frontend must not optimistically claim `running` before the backend reports it.
+
+## Implemented host-key consent extension
+
+`get_host_key_prompts()` and `respond_host_key(prompt_id, trust)` expose Oryxis'
+manual host-key question. `tunnelwarden://host-key` broadcasts the pending
+question list. A question includes hostname, SSH port, key algorithm, SHA256
+fingerprint and (when changed) the old fingerprint. Accept persists trust before
+responding to the engine. Background starts never prompt or accept unknown keys.
+
+Stop/Delete wait for any attached forward's explicit cancellation. Save Tunnel
+stops the old runtime before persisting the edited rule. Editing an SSH host
+requires its own and dependent jump-route connections to be idle. Password input
+is accepted only by save_host, stored by the OS, and never returned by queries.

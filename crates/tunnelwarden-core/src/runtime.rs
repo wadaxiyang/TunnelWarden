@@ -38,6 +38,7 @@ enum Command {
     Configure(Vec<PortForwardRule>, bool, Reply),
     AutoStart(Reply),
     Shutdown(Reply),
+    EnsureHostIdle(Uuid, Reply),
 }
 enum Message {
     ConnReady(Uuid, Result<ForwardConn, String>),
@@ -118,6 +119,10 @@ impl TunnelRuntimeManager {
     }
     pub async fn auto_start(&self) -> Result<(), String> {
         self.request(Command::AutoStart).await
+    }
+    pub async fn ensure_host_idle(&self, host: Uuid) -> Result<(), String> {
+        self.request(|reply| Command::EnsureHostIdle(host, reply))
+            .await
     }
     pub async fn shutdown(&self) -> Result<(), String> {
         for rule in self.snapshot().tunnels {
@@ -211,6 +216,10 @@ impl RuntimeState {
         loop {
             let task = tokio::select! {
                 cmd = rx.recv() => match cmd {
+                    Some(Command::EnsureHostIdle(id, reply)) => {
+                        let result = if self.forward_conns.contains_key(&id) { Err("SSH host still has a live or pending connection; stop its tunnels and wait for the connection to finish".into()) } else { Ok(()) };
+                        let _ = reply.send(result); Task::none()
+                    }
                     Some(Command::Start(id, reply)) => {
                         if !self.port_forward_rules.iter().any(|r| r.id == id) {
                             let _ = reply.send(Err("Tunnel not found".into())); Task::none()
