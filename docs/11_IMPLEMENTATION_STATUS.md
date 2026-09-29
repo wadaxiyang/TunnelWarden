@@ -107,3 +107,20 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
   decorative glyph requires no text-contrast judgment). Inspected screenshots.
 - Fixed Vite watching Rust DLL outputs on Windows (EBUSY) by excluding build,
   reference and Tauri directories from the frontend watcher.
+
+## Phase 6 — passed on Windows, 2026-09-29
+
+- Tray: open window, start all, stop all and quit. Each operation calls the same
+  service/runtime path. Launch auto-start uses `runtime.auto_start()` once.
+- Window close hides to tray when enabled. Quit waits for runtime shutdown;
+  repeated quit requests cannot bypass the pending cancellation. Single-instance
+  plugin focuses the existing process instead of starting another engine.
+- Login startup uses the Tauri autostart plugin; settings report actual OS state
+  and restore it if configuration saving fails. Enabled/disabled roundtrip
+  passed under the separate `TunnelWarden Smoke Test` registration; removed it.
+- Structured logs retain 1,000 entries in memory and write to rotating platform
+  log files (1 MB, three archives). Added bounded/filter test.
+- Full gates passed: 13 unit + 8 SSH integration tests, frontend check/build.
+  Repeated the real WebView smoke suite successfully with all shell plugins.
+  Native Windows automation confirmed Close removes the window while the process
+  remains alive; relaunch focuses the original PID. Normal quit exits it.

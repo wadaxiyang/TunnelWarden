@@ -1,6 +1,8 @@
 //! Serialization-only shell. All behavior is in the core service.
 use std::sync::Arc;
 use tauri::State;
+use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_opener::OpenerExt;
 use tunnelwarden_core::{dto::*, service::AppService};
 use uuid::Uuid;
 type Service<'a> = State<'a, Arc<AppService>>;
@@ -22,8 +24,10 @@ pub fn get_logs(service: Service<'_>, filter: Option<LogFilter>) -> Vec<LogEntry
     service.get_logs(filter)
 }
 #[tauri::command]
-pub fn get_settings(service: Service<'_>) -> Settings {
-    service.get_settings()
+pub fn get_settings(app: tauri::AppHandle, service: Service<'_>) -> Result<Settings, String> {
+    let mut settings = service.get_settings();
+    settings.launch_at_login = app.autolaunch().is_enabled().map_err(|e| e.to_string())?;
+    Ok(settings)
 }
 #[tauri::command]
 pub async fn save_host(service: Service<'_>, host: SaveHost) -> Result<HostDto, String> {
@@ -54,8 +58,29 @@ pub async fn restart_tunnel(service: Service<'_>, tunnel_id: Uuid) -> Result<(),
     service.restart_tunnel(tunnel_id).await
 }
 #[tauri::command]
-pub async fn set_settings(service: Service<'_>, settings: Settings) -> Result<(), String> {
-    service.set_settings(settings).await
+pub async fn set_settings(
+    app: tauri::AppHandle,
+    service: Service<'_>,
+    settings: Settings,
+) -> Result<(), String> {
+    let launch = app.autolaunch();
+    let previous = launch.is_enabled().map_err(|e| e.to_string())?;
+    if settings.launch_at_login {
+        launch.enable()
+    } else {
+        launch.disable()
+    }
+    .map_err(|e| e.to_string())?;
+    if let Err(e) = service.set_settings(settings).await {
+        let rollback = if previous {
+            launch.enable()
+        } else {
+            launch.disable()
+        };
+        rollback.map_err(|r| format!("{e}; restoring launch-at-login failed: {r}"))?;
+        return Err(e);
+    }
+    Ok(())
 }
 #[tauri::command]
 pub fn get_host_key_prompts(service: Service<'_>) -> Vec<HostKeyPrompt> {
@@ -64,4 +89,15 @@ pub fn get_host_key_prompts(service: Service<'_>) -> Vec<HostKeyPrompt> {
 #[tauri::command]
 pub fn respond_host_key(service: Service<'_>, prompt_id: Uuid, trust: bool) -> Result<(), String> {
     service.prompts.respond(prompt_id, trust)
+}
+
+#[tauri::command]
+pub fn open_source(app: tauri::AppHandle) -> Result<(), String> {
+    app.opener()
+        .open_url("https://github.com/wadaxiyang/TunnelWarden", None::<&str>)
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+pub fn quit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }

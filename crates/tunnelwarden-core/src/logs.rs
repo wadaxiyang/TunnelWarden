@@ -49,3 +49,24 @@ impl LogBook {
         self.events.subscribe()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn logs_are_bounded_and_filters_are_applied() {
+        let logs = LogBook::default();
+        let id = Uuid::new_v4();
+        for n in 0..1010 {
+            logs.push("info", None, format!("entry {n}"));
+        }
+        logs.push("error", Some(id), "fixture error");
+        assert_eq!(logs.get(None).len(), 1000);
+        let filtered = logs.get(Some(LogFilter {
+            tunnel_id: Some(id),
+            level: Some("error".into()),
+        }));
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].message, "fixture error");
+    }
+}
