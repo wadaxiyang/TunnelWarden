@@ -25,3 +25,31 @@ pub struct RuntimeTunnel {
 pub struct RuntimeSnapshot {
     pub tunnels: Vec<RuntimeTunnel>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Settings {
+    pub auto_reconnect: bool,
+    pub launch_at_login: bool,
+    pub close_to_tray: bool,
+}
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            auto_reconnect: true,
+            launch_at_login: false,
+            close_to_tray: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostKeyPrompt {
+    pub id: Uuid,
+    pub host_id: Uuid,
+    pub hostname: String,
+    pub port: u16,
+    pub key_type: String,
+    pub fingerprint: String,
+    pub old_fingerprint: Option<String>,
+}

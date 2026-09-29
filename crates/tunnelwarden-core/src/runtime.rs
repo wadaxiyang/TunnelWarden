@@ -28,6 +28,7 @@ pub type DialFuture = Pin<Box<dyn Future<Output = Result<ForwardConn, String>> +
 /// Application credential/host-key adapter. SSH remains entirely in Oryxis.
 pub trait ForwardDialer: Send + Sync + 'static {
     fn connect(&self, host_id: Uuid, unattended: bool) -> DialFuture;
+    fn cancel_prompts(&self, _host_id: Uuid) {}
 }
 
 type Reply = oneshot::Sender<Result<(), String>>;
@@ -270,6 +271,16 @@ impl RuntimeState {
     }
     fn stop_port_forward(&mut self, id: Uuid, reply: Reply) -> Task<Message> {
         self.port_forward_starting.remove(&id);
+        if let Some(rule) = self.port_forward_rules.iter().find(|r| r.id == id) {
+            let host_id = rule.host_id;
+            if !self
+                .port_forward_rules
+                .iter()
+                .any(|r| r.host_id == host_id && self.port_forward_starting.contains(&r.id))
+            {
+                self.dialer.cancel_prompts(host_id);
+            }
+        }
         // A manual stop must never resurrect on a later retry tick.
         self.port_forward_retry.remove(&id);
         self.errors.remove(&id);

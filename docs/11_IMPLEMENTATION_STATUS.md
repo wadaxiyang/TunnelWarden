@@ -64,3 +64,18 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
   5 real SSH integration tests, none ignored. The tests include virtual-time
   retry deadlines, late attach failure, shared connection call count, remote
   delete/rebind, launch auto-start and connection drop into retry.
+
+## Phase 3 — passed on Windows, 2026-09-29
+
+- Versioned atomic JSON stores upstream host/rule/known-host types and user
+  settings, never passwords or runtime state. Corrupt/future files fail closed
+  and remain untouched. Failed edits preserve both disk and memory.
+- Passwords use Windows Credential Manager (real OS roundtrip test passed).
+  Key files are read on connect; encrypted keys can use an external SSH agent.
+- Ported resolver and host-key callback from `connect_methods.rs`; direct,
+  one-hop and nested two-hop forwarding all passed against actual test servers.
+- Manual host-key consent persists the verified fingerprint; unattended unknown
+  keys fail without prompting. Stop dismisses that host's pending questions.
+- All four Cargo gates plus boundary checks passed: 12 unit + 7 SSH integration
+  tests, none ignored. Saving auto-start describes launch policy; a manual Stop
+  suppresses retries during the current run, matching Oryxis.

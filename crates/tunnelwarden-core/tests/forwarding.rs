@@ -6,6 +6,7 @@
 // Oryxis 16ad2af83b424780ff60b6420a6c20a3b30c7143.
 mod common;
 use common::*;
+use oryxis_core::models::known_host::KnownHost;
 use oryxis_core::models::{connection::AuthMethod, port_forward_rule::ForwardKind};
 use oryxis_ssh::KeyMaterial;
 use std::sync::{
@@ -18,9 +19,30 @@ use tokio::{
     net::TcpStream,
 };
 use tunnelwarden_core::{
+    credentials::SecretStore,
+    dial::{ApplicationDialer, PromptBroker},
+    storage::ConfigStore,
+};
+use tunnelwarden_core::{
     dto::TunnelStatus,
     runtime::{DialFuture, ForwardDialer, TunnelRuntimeManager},
 };
+
+#[derive(Default)]
+struct TestSecrets(std::sync::Mutex<std::collections::HashMap<uuid::Uuid, String>>);
+impl SecretStore for TestSecrets {
+    fn get(&self, id: uuid::Uuid) -> Result<Option<String>, String> {
+        Ok(self.0.lock().unwrap().get(&id).cloned())
+    }
+    fn set(&self, id: uuid::Uuid, value: &str) -> Result<(), String> {
+        self.0.lock().unwrap().insert(id, value.into());
+        Ok(())
+    }
+    fn delete(&self, id: uuid::Uuid) -> Result<(), String> {
+        self.0.lock().unwrap().remove(&id);
+        Ok(())
+    }
+}
 
 struct TestDialer {
     connection: oryxis_core::models::connection::Connection,
@@ -224,4 +246,92 @@ async fn runtime_auto_start_liveness_and_manual_stop_during_retry() {
     assert_eq!(runtime.snapshot().tunnels[0].status, TunnelStatus::Stopped);
     assert!(runtime.snapshot().tunnels[0].next_retry_at.is_none());
     runtime.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn credential_adapter_and_upstream_nested_jump_routes_work_end_to_end() {
+    let fixtures: Vec<_> = (0..3).map(|_| Fixture::start()).collect();
+    let mut hosts: Vec<_> = fixtures.iter().map(Fixture::connection).collect();
+    hosts[1].jump_chain = vec![hosts[0].id];
+    hosts[2].jump_chain = vec![hosts[1].id];
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(ConfigStore::open(dir.path().join("config.json")).unwrap());
+    let secrets = Arc::new(TestSecrets::default());
+    for h in &hosts {
+        secrets.set(h.id, PASSWORD).unwrap();
+    }
+    store
+        .update(|c| {
+            c.hosts = hosts.clone();
+            c.known_hosts = fixtures
+                .iter()
+                .map(|f| {
+                    KnownHost::new("127.0.0.1", f.info.port, "ssh-ed25519", &f.info.fingerprint)
+                })
+                .collect();
+            Ok(())
+        })
+        .unwrap();
+    let prompts = Arc::new(PromptBroker::new(store.clone()));
+    let dialer = ApplicationDialer {
+        store,
+        secrets,
+        prompts,
+    };
+    for index in [1, 2] {
+        let conn = dialer.connect(hosts[index].id, true).await.unwrap();
+        let r = rule(&hosts[index], ForwardKind::Local).await;
+        let session = conn.attach(&r).await.unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", r.listen_port))
+            .await
+            .unwrap();
+        banner(&mut stream).await;
+        session.cancel().await;
+    }
+}
+
+#[tokio::test]
+async fn manual_host_key_consent_persists_trust_and_unattended_unknown_keys_fail() {
+    let fixture = Fixture::start();
+    let host = fixture.connection();
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(ConfigStore::open(dir.path().join("config.json")).unwrap());
+    store
+        .update(|c| {
+            c.hosts.push(host.clone());
+            Ok(())
+        })
+        .unwrap();
+    let secrets = Arc::new(TestSecrets::default());
+    secrets.set(host.id, PASSWORD).unwrap();
+    let prompts = Arc::new(PromptBroker::new(store.clone()));
+    let dialer = ApplicationDialer {
+        store: store.clone(),
+        secrets,
+        prompts: prompts.clone(),
+    };
+    assert!(dialer.connect(host.id, true).await.is_err());
+    assert!(prompts.snapshot().is_empty());
+    let mut questions = prompts.subscribe();
+    let connect = tokio::spawn(dialer.connect(host.id, false));
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        questions.wait_for(|q| !q.is_empty()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let question = prompts.snapshot()[0].clone();
+    assert_eq!(question.fingerprint, fixture.info.fingerprint);
+    prompts.respond(question.id, true).unwrap();
+    assert!(connect.await.unwrap().is_ok());
+    assert_eq!(
+        ConfigStore::open(store.path())
+            .unwrap()
+            .snapshot()
+            .known_hosts
+            .len(),
+        1
+    );
+    assert!(dialer.connect(host.id, true).await.is_ok());
 }

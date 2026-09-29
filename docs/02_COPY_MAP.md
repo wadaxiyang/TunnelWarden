@@ -81,3 +81,16 @@ application adapter; errors are per-rule; monotonic time uses Tokio Instant
 so its added-key count is zero. Stop IPC waits for a pending attach to finish
 cancelling before acknowledging; this also serializes immediate Stop/Start
 without adding generations. Tests cover a late attach error after Stop.
+
+## G. Connection adapter (2026-09-29)
+
+`crates/tunnelwarden-core/src/dial.rs`: `connect_methods.rs`'s
+`make_jump_resolver`, `expand_jump_chain`, `make_host_key_check`, and
+`dispatch_port_forwards.rs`'s manual/background engine setup. Calls
+`oryxis_core::jump_route::expanded_jump_chain` unchanged. Vault/group/identity
+lookups become configuration + Windows Credential Manager lookups. No group,
+proxy, certificate or TOTP features are surfaced. Host-key prompts use a Tokio
+broker with per-question IDs and persistent consent; unattended connections
+remain strict. Cancellation dismisses a stopped host's prompts. Key files are
+read as supplied; encrypted keys should be loaded into ssh-agent (the pinned
+engine accepts decrypted PEM via KeyMaterial). No new key decryption is added.

@@ -13,6 +13,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 uuid.workspace = true
+chrono = { version = "0.4", features = ["serde"] }
+tempfile = "3"
+dirs = "6"
+
+[target.'cfg(windows)'.dependencies]
+keyring = { version = "3", features = ["windows-native"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["net", "io-util", "test-util"] }
