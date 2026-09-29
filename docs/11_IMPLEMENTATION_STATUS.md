@@ -90,3 +90,20 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
 - Headless service test exercises CRUD, validation, Start (not false-ready),
   Stop, Restart, live remote Delete and reloading saved configuration.
 - All Cargo gates and boundary checks passed: 12 unit + 8 integration tests.
+
+## Phase 5 — passed on Windows, 2026-09-29
+
+- Svelte GUI implements all five navigation surfaces, mode-specific tunnel
+  forms, independent SSH port, ordered jump routes, password/key/agent fields,
+  authoritative status/events, errors, logs, settings, host-key consent and
+  embedded license/attribution. Edit/Delete use explicit dialogs.
+- `npm run check`: zero errors and warnings. `npm run build`: passed.
+- `tests/ui-smoke.mjs` passed against a real Tauri WebView via CDP, with an
+  isolated `dev.tunnelwarden.smoketest` application identifier. It exercises
+  host/tunnel CRUD, editable Remote listener and Local target ports, hidden
+  Dynamic target fields, editing, delete confirmation, settings and About.
+  No mocked IPC backend. Test profiles were removed afterwards.
+- Browser page errors: none. Accessibility audit: zero violations (one
+  decorative glyph requires no text-contrast judgment). Inspected screenshots.
+- Fixed Vite watching Rust DLL outputs on Windows (EBUSY) by excluding build,
+  reference and Tauri directories from the frontend watcher.
