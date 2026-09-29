@@ -1,0 +1,11 @@
+[oryxis]
+repository = "https://github.com/wilsonglasser/oryxis"
+commit = "16ad2af83b424780ff60b6420a6c20a3b30c7143"
+license = "AGPL-3.0-or-later"
+
+[dependencies]
+core = "crates/oryxis-core"
+ssh = "crates/oryxis-ssh"
+
+[app_reference]
+primary = "crates/oryxis-app/src/dispatch_port_forwards.rs"

@@ -1,0 +1,16 @@
+:root { font-family: Inter, "Segoe UI", system-ui, sans-serif; color: #e9edf3; background: #0f1218; font-synthesis: none; }
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 640px; min-height: 100vh; }
+button { font: inherit; }
+.shell { display: grid; grid-template-columns: 210px 1fr; min-height: 100vh; }
+aside { padding: 18px 12px; border-right: 1px solid #252b35; background: #141820; }
+.brand { font-size: 18px; font-weight: 650; padding: 8px 10px 18px; }
+nav { display: grid; gap: 4px; }
+nav button { text-align: left; border: 0; border-radius: 8px; padding: 9px 10px; color: #b9c0cc; background: transparent; }
+nav button.active { color: white; background: #222a36; }
+.content { padding: 28px; }
+header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 24px; }
+h1 { margin: 0; font-size: 26px; }
+.primary { border: 0; border-radius: 8px; padding: 9px 14px; color: white; background: #377cf6; }
+.empty { min-height: 320px; display: grid; place-content: center; gap: 8px; text-align: center; color: #8f99a8; border: 1px solid #252b35; border-radius: 12px; background: #141820; }
+.empty strong { color: #e9edf3; }
