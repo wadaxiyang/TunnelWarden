@@ -7,7 +7,7 @@ on:
       tag:
         description: Existing release tag to build
         required: true
-        default: v0.1.0
+        default: v0.2.0
 permissions:
   contents: write
 concurrency:
@@ -40,6 +40,11 @@ jobs:
           npm ci
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run licenses
+      - name: Cache pinned Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2, immutable commit
+        with:
+          shared-key: windows-1.94.1
+          cache-on-failure: true
       - name: Full acceptance gates
         shell: pwsh
         run: ./scripts/check.ps1 -Frontend

@@ -29,3 +29,9 @@ Every copied/modified source unit must retain the relevant upstream notice and b
 - `THIRD_PARTY_NOTICES.md`: project attribution map
 
 This engineering document is not legal advice; when distributing binaries or offering a network-accessible modified covered work, verify current compliance requirements before release.
+
+## v0.2 source additions
+
+The `oryxis-vault` key-import API uses the same immutable SHA as core/ssh.
+No vault UI/database is introduced. Copied session redaction and all upstream
+notices remain AGPL-3.0-or-later, with provenance in `docs/02_COPY_MAP.md`.

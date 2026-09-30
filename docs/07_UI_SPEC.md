@@ -97,3 +97,13 @@ The SSH server port must never be conflated with tunnel listener/target ports.
 - labels always visible; placeholders do not replace labels
 - error text next to the relevant form section
 - dark/light/system theme may be added without changing information architecture
+
+## v0.2 authorized additions
+
+Saved hosts include a cancellable connection test. Private-key unlock asks for
+an ephemeral passphrase and explains process-memory caching. Logs export a
+current-session error report through native Save As. Remote configuration
+explains server forwarding/bind policies and external reachability remains
+explicitly unverified. Closing the UI releases its WebView; an unsaved editor,
+settings draft or pending question requests confirmation. Backend runtime and
+tray survive, and a recreated UI always reloads the authoritative state.

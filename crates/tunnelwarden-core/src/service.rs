@@ -77,7 +77,11 @@ impl AppService {
                 }
             }
         });
-        logs.push("info", None, "TunnelWarden 0.1.0 started");
+        logs.push(
+            "info",
+            None,
+            format!("TunnelWarden {} started", env!("CARGO_PKG_VERSION")),
+        );
         Arc::new(Self {
             runtime,
             prompts,

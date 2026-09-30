@@ -230,3 +230,20 @@ receive a close confirmation. Reopening fetches state and subscriptions anew.
   launch created a working UI. Debug cold-background working set was about
   25 MB (measurement only, not a release memory guarantee).
 - Native close with an unsaved form offered Keep editing; draft was retained.
+
+### v0.2 release candidate — local gates passed
+
+Version is 0.2.0 in both Rust crates, npm/lock, Tauri config and About UI.
+Final full acceptance passed (26 unit + 11 SSH integration, no ignored tests,
+fmt/check/test/clippy/boundaries, Svelte check/build). The optimized local NSIS
+installer built successfully: `TunnelWarden_0.2.0_x64-setup.exe` (5,675,738 bytes).
+676 dependency notices were collected from the locked inputs.
+CI/release share an immutable Rust-cache action; release also starts the
+installed executable with `--autostart` and rejects a WebView2 child process.
+The workflow collects exact versioned EXE/MSI paths to avoid stale cached bundles.
+
+v0.2 phase ledger before tagging:
+- Core adapters and tests: `97d268c0921eac7eeac8fd4e93f7ca84f421f708`.
+- IPC and UI: `477e84f4bdf7475aba64af7ae832763b6106941a`.
+- Disposable UI and native acceptance: `a90a3ca776d93bc40b70ad8becd9be32652f47a0`.
+- Publication receipt will be appended only after GitHub Release/assets succeed.

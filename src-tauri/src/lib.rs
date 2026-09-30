@@ -105,7 +105,10 @@ pub fn run() {
             if !std::env::args().any(|arg| arg == "--autostart") {
                 tray::show(app.handle());
             }
-            log::info!("TunnelWarden 0.1.0 starting; Oryxis 16ad2af");
+            log::info!(
+                "TunnelWarden {} starting; Oryxis 16ad2af",
+                env!("CARGO_PKG_VERSION")
+            );
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = service.runtime.auto_start().await {
                     service.logs.push("error", None, e);

@@ -1,22 +1,33 @@
-TunnelWarden 0.1.0 is a focused Windows x64 SSH tunnel manager.
+TunnelWarden 0.2.0 adds connection diagnostics and an on-demand interface.
 
-- Local (-L), remote (-R) and dynamic SOCKS5 (-D) forwarding.
-- Password, key-file and external ssh-agent authentication; ordered jump chains.
-- Shared connections, start/stop/restart, launch auto-start and reconnect.
-- Host-key verification, Windows Credential Manager passwords, atomic settings.
-- Tray controls, launch at login, logs and license/source information.
+- **Test connection** on saved SSH hosts: verifies real SSH authentication,
+  jump routes and host fingerprints, without starting a tunnel. Supports cancel.
+- **Encrypted private keys**: passphrase prompt, wrong-passphrase retry and
+  cancellation. Decryption uses pinned Oryxis `oryxis-vault::import_key`.
+  Passphrases are never saved; unlocked keys stay in memory until app exit.
+- **Export error logs**: native Save As produces JSON with errors, recent
+  activity, runtime state, version and upstream commit. Oryxis redaction masks
+  known secret shapes. Review server addresses/error details before sharing.
+- **Remote listener guidance**: server policy requirements, original refusal
+  errors and an explicit distinction between established forwarding and
+  unverified external/public reachability.
+- **UI on demand**: closing destroys the WebView while Rust tunnels and tray
+  continue. Tray/second launch recreates it. Login startup creates no WebView.
+  Unsaved edits receive a close confirmation.
 
-Install the x64-setup.exe (per-user NSIS) or .msi package. Installers download
-Microsoft WebView2 when needed. Packages are unsigned; no certificate is
-configured. SHA256SUMS.txt records the published file hashes.
+Install the Windows x64 `x64-setup.exe` (per-user NSIS) or `.msi` package.
+Installers acquire Microsoft WebView2 if needed. Packages are unsigned.
+SHA256SUMS.txt contains the artifact hashes. Existing v0.1 configuration is
+compatible; this update does not migrate or reset saved profiles.
 
-SSH engine: Oryxis 16ad2af83b424780ff60b6420a6c20a3b30c7143, unchanged.
-The standalone runtime is adapted from that revision with source provenance.
-TunnelWarden is AGPL-3.0-or-later; source and dependency/license notices accompany
-this release. See README.md for build instructions and operating details.
+Oryxis remains pinned to 16ad2af83b424780ff60b6420a6c20a3b30c7143. SSH engine
+behavior is unchanged; standalone runtime and diagnostic masking retain source
+provenance. AGPL-3.0-or-later; source and license notices accompany this release.
 
-Known limits: Windows x64 only; encrypted key files require an external agent;
-no terminal/SFTP/internal agent, certificate or interactive OTP UI. Remote binds
-are subject to SSH server forwarding/GatewayPorts policy. Automatic connections
-refuse unknown or changed host keys until manually verified. The app must stay
-running (usually in the tray) to maintain tunnels.
+Known limits: Windows x64 only. Encrypted files require manual unlock after a
+full process restart, or an external agent for unattended authentication.
+Unknown/changed host keys require manual verification. No terminal, SFTP,
+built-in agent, certificate or interactive OTP UI. Remote/public access still
+depends on server policy and network configuration. Reports cover the current
+process session (up to 1,000 entries); earlier rotating files are separate.
+The app must remain running in the tray to maintain tunnels.
