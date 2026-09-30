@@ -132,7 +132,14 @@ fn worker(service: Arc<AppService>, rx: mpsc::Receiver<Command>) {
                     pending = None;
                 } else if since.elapsed() >= Duration::from_millis(500) {
                     pending = None;
-                    match Panel::new(rect) {
+                    let lines = panel_text(
+                        &service.list_tunnels(),
+                        &service.get_runtime_snapshot(),
+                        &Default::default(),
+                    )
+                    .lines()
+                    .count();
+                    match Panel::new(rect, lines) {
                         Ok(created) => {
                             panel = Some(created);
                             sampler = RateSampler::default();
@@ -191,7 +198,7 @@ struct Panel {
     text: String,
 }
 impl Panel {
-    fn new(anchor: Bounds) -> std::io::Result<Self> {
+    fn new(anchor: Bounds, lines: usize) -> std::io::Result<Self> {
         // SAFETY: all pointers refer to live UTF-16 strings/stack structs during
         // synchronous calls. Handles are checked and released on their owner thread.
         unsafe {
@@ -233,7 +240,7 @@ impl Panel {
                     bottom: r.bottom,
                 },
                 scale(480),
-                scale(360),
+                scale((24 + lines.min(100) as i32 * 19).clamp(160, 360)),
                 scale(8),
             );
             let hwnd = CreateWindowExW(
@@ -317,7 +324,17 @@ impl Panel {
             SendMessageW(self.edit, EM_LINESCROLL, 0, line);
             SendMessageW(self.edit, WM_SETREDRAW, 1, 0);
             InvalidateRect(self.edit, std::ptr::null(), 1);
-            ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+            // SetWindowPos avoids ShowWindow's first-call STARTUPINFO override
+            // (a headless/login launch can carry SW_HIDE).
+            SetWindowPos(
+                self.hwnd,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
         }
     }
 }
@@ -353,7 +370,7 @@ mod tests {
                 bottom: cursor.y + 24,
             };
             for _ in 0..3 {
-                let mut panel = Panel::new(anchor).unwrap();
+                let mut panel = Panel::new(anchor, 120).unwrap();
                 let text = (0..40)
                     .map(|i| {
                         format!(
@@ -428,6 +445,19 @@ mod tests {
             std::thread::sleep(Duration::from_millis(25));
         }
         assert!(visible(), "Sustained hover must create the native window");
+        // Let two real telemetry refreshes run; an empty configuration is still
+        // a useful panel, and the background worker must remain responsive.
+        std::thread::sleep(Duration::from_millis(2200));
+        unsafe {
+            let hwnd = FindWindowW(w!("TunnelWardenTrayStatus"), w!("TunnelWarden status"));
+            assert_ne!(IsWindowVisible(hwnd), 0);
+            let edit = GetWindow(hwnd, GW_CHILD);
+            let mut text = [0u16; 2048];
+            let n = GetWindowTextW(edit, text.as_mut_ptr(), text.len() as i32);
+            assert!(
+                String::from_utf16_lossy(&text[..n as usize]).contains("No tunnels configured")
+            );
+        }
         panel.hide();
         let deadline = Instant::now() + Duration::from_secs(2);
         while visible() && Instant::now() < deadline {

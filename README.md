@@ -1,4 +1,4 @@
-# TunnelWarden 0.2.0
+# TunnelWarden 0.2.1
 
 ## Install and use
 
@@ -35,7 +35,16 @@ Close **destroys the interface/WebView** when background mode is enabled.
 Only the Rust runtime and tray remain; tunnels keep running. The tray or a
 second launch recreates the interface in the same process. Unsaved drafts get
 a close confirmation. Launch at login starts in the background with no WebView.
-Tray offers Open, Start all, Stop all and Quit. Quit cancels tunnels before exit.
+Hover the tray icon for a native text panel showing each tunnel's state and
+upload/download payload rates. It appears after half a second, scrolls for long
+lists, never takes focus, and is destroyed when dismissed. It creates no WebView.
+Rates sample once per second while the panel is visible; the first sample is a
+baseline. Upload means this PC → SSH; download means SSH → this PC, including
+for Remote forwarding. Protocol overhead is excluded and rates reset on reconnect.
+Right-click → **Tunnels → name/status → Start or Stop** controls individual rules.
+Connecting/Retrying can be stopped. Open, Start all, Stop all and Quit remain;
+Quit cancels tunnels before exit. A manual key/fingerprint question still opens
+the main interface when needed.
 Reopening the UI does not restart the app or rerun auto-start.
 
 In **Logs**, use **Export error logs** to save a JSON diagnostic report with
@@ -56,7 +65,7 @@ report before sharing.
   auto-start can authenticate. Use an external SSH agent for unattended unlock.
 - No certificate/interactive OTP UI, terminal, SFTP or built-in agent is included.
 - Remote listeners remain subject to SSH server forwarding/GatewayPorts policy.
-- Windows x64 is the only packaged and validated target for 0.2.0.
+- Windows x64 is the only packaged and validated target for 0.2.1.
 
 ## Build and validate
 
@@ -99,6 +108,11 @@ TunnelWarden is a small desktop SSH port-forward manager built around **Oryxis' 
 2. Standalone port-forward runtime behavior is **ported from Oryxis `oryxis-app`**, especially `dispatch_port_forwards.rs`.
 3. If Oryxis already implements a required SSH / forwarding / retry behavior, **copy or call it; do not redesign it**.
 4. TunnelWarden-owned Rust code should mostly be adapters: persistence, Tauri commands/events, runtime registry integration, and application-specific DTOs.
+The complete pinned SSH crate is vendored with a small, audited passive payload
+counter patch; it does not change the SSH/forwarding/retry control flow. See
+`vendor/oryxis-ssh/PROVENANCE.md` and `upstream/oryxis-ssh-traffic.patch`.
+`python scripts/verify-vendor.py` checks every file against the exact upstream.
+
 5. The GUI is new: **Tauri 2 + Svelte 5 + TypeScript**. Do not copy Oryxis' iced UI.
 
 ## Target scope

@@ -1,6 +1,6 @@
 # Implementation status
 
-Current release: **TunnelWarden 0.2.0 — published and verified**, Windows x64.
+Current target: **TunnelWarden 0.2.1 — release acceptance in progress**, Windows x64.
 Development branch: `master`. The v0.1 phase history is retained below;
 the v0.2 implementation and publication receipts follow it.
 
@@ -310,4 +310,19 @@ Telemetry phase commit: `0862d020124e4d5f85d68c5d21c10ef097d722ad`.
 
 Full native shell gate passed: 31 unit + 12 real SSH integration tests,
 fmt/check/test/clippy, boundary/source-patch scans and frontend check/build.
+
+
+### v0.2.1 release candidate
+
+Native shell phase commit: `269bce2` (full SHA in Git). Version raised to 0.2.1
+in both application crates, npm/lock, Tauri configuration, About and workflow
+default tag. Existing data identifier and schema are unchanged. Final gates
+and Windows installers are being checked before tagging/publication.
+
+Final candidate gate passed: 31 unit + 12 SSH integration tests, all Cargo
+gates, boundary/source diff checks, Svelte check/build. Optimized local NSIS
+TunnelWarden_0.2.1_x64-setup.exe built successfully. Native Alt-F4 preserved
+actual forwarding with zero smoke WebViews; reopening restored the runtime.
+Native popup rendering was visually inspected; first-show visibility and
+short-list height were hardened and retested. Ready for v0.2.1 tag workflows.
 

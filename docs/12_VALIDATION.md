@@ -65,3 +65,30 @@ Both ran 26 unit and 11 real SSH integration tests with zero failures/ignored
 cases. Release logs confirm two bundles and installed headless startup with
 no WebView2 child. All seven published checksum entries match GitHub digests;
 the downloaded source ZIP identifies the exact release commit.
+
+## v0.2.1 acceptance
+
+- 31 unit tests (26 core + 5 native presentation), 12 real SSH integration tests.
+- 128 KiB live payload echo in both directions for L/R/D; exact counts before
+  EOF; SOCKS framing excluded; sibling counters stay zero; reattach resets.
+- Real Win32 HWND/control tests: no foreground change, Unicode/read-only text,
+  scroll preservation while rates change, destroyed handles after dismissal.
+- Hover worker receives synthetic Enter/Hide/Leave/Quit events with the real
+  empty AppService: dwell, cancelled short hover, reopen and quit pass.
+- Monotonic rate/reset and negative-monitor/top-taskbar geometry unit tests.
+- Real isolated Tauri test `tests/ui-v02.mjs` passed again: encrypted-key retry,
+  fingerprint consent, host test, remote help and actual local-tunnel banner.
+- Fresh isolated `--autostart` process had no matching WebView2 processes.
+- Shell tray pointer automation was not reliable in this environment; physical
+  mouse hover and nested-menu selection are not recorded as manual acceptance.
+  Worker, native controls, menu state mapping and service lifecycle have executable
+  coverage. Multi-monitor coordinates are tested in geometry, not on physical
+  multiple displays.
+
+Final desktop checks: native Alt-F4 left zero smoke-instance WebView2 processes
+while an SSH banner still traversed the local listener; second launch recreated
+the interface and tests reused the in-memory key. Smoke profiles/processes were
+cleaned. The actual native panel was visually inspected during the worker test.
+Headless first-show uses SetWindowPos(SWP_SHOWWINDOW | SWP_NOACTIVATE) to avoid
+ShowWindow's STARTUPINFO SW_HIDE override; tests explicitly assert visibility.
+Panel height is compact for short lists and capped with scrolling for long lists.
