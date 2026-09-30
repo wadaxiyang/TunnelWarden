@@ -2,6 +2,7 @@
 use std::sync::Arc;
 use tauri::State;
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
 use tunnelwarden_core::{dto::*, service::AppService};
 use uuid::Uuid;
@@ -100,4 +101,50 @@ pub fn open_source(app: tauri::AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn quit_app(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+#[tauri::command]
+pub async fn test_host(service: Service<'_>, host_id: Uuid) -> Result<HostTestResult, String> {
+    service.test_host(host_id).await
+}
+#[tauri::command]
+pub fn cancel_host_test(service: Service<'_>, host_id: Uuid) {
+    service.cancel_host_test(host_id);
+}
+#[tauri::command]
+pub fn get_key_passphrase_prompts(service: Service<'_>) -> Vec<KeyPassphrasePrompt> {
+    service.prompts.key_snapshot()
+}
+#[tauri::command]
+pub fn respond_key_passphrase(
+    service: Service<'_>,
+    prompt_id: Uuid,
+    passphrase: Option<String>,
+) -> Result<(), String> {
+    service.prompts.respond_key(prompt_id, passphrase)
+}
+#[tauri::command]
+pub async fn export_error_logs(
+    app: tauri::AppHandle,
+    service: Service<'_>,
+) -> Result<Option<String>, String> {
+    let report = service.diagnostic_report()?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .add_filter("Diagnostic report", &["json"])
+        .set_file_name("TunnelWarden-diagnostics.json")
+        .save_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(path) = rx.await.map_err(|e| e.to_string())? else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        std::fs::write(&path, report).map_err(|e| format!("Cannot export report: {e}"))?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }

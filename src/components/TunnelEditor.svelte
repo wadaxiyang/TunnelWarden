@@ -23,12 +23,20 @@
       <div class="form-section full"><h3>{draft.kind === 'Remote' ? 'Remote listener' : draft.kind === 'Dynamic' ? 'Local SOCKS listener' : 'Local listener'}</h3><p>{draft.kind === 'Remote' ? 'The SSH server listens here and forwards traffic back to this computer.' : 'Applications on this computer connect to this address.'}</p></div>
       <label>{draft.kind === 'Remote' ? 'Remote listen address' : 'Local listen address'}<input bind:value={draft.listen_address} required placeholder="127.0.0.1" /></label>
       <label>{draft.kind === 'Remote' ? 'Remote listen port' : draft.kind === 'Dynamic' ? 'Local SOCKS port' : 'Local listen port'}<input type="number" min="1" max="65535" step="1" required bind:value={draft.listen_port} /></label>
+      {#if draft.kind === 'Remote'}
+        <div class="notice full"><strong>Remote listener requirements</strong><p>The SSH server must permit remote TCP forwarding (AllowTcpForwarding and PermitListen; account/key restrictions also apply).</p>
+          {#if !['localhost', '::1', '[::1]'].includes(draft.listen_address.trim().toLowerCase()) && !/^127\./.test(draft.listen_address.trim())}
+            <p>Listening beyond loopback requires server GatewayPorts policy. With OpenSSH, clientspecified permits the requested bind address; yes can force a wildcard bind. The server may refuse or override your requested address.</p>
+          {/if}
+          <p>A successful forward does not prove external or public access. Check the actual server bind address, firewall/security group, routing/NAT and target service, then connect from a separate external machine.</p>
+        </div>
+      {/if}
       {#if draft.kind !== 'Dynamic'}
         <div class="form-section full"><h3>{draft.kind === 'Remote' ? 'Local target' : 'Remote target'}</h3><p>{draft.kind === 'Remote' ? 'The destination reached from this computer.' : 'The destination reached from the SSH server.'}</p></div>
         <label>{draft.kind === 'Remote' ? 'Local target host' : 'Remote target host'}<input bind:value={draft.target_host} required placeholder={draft.kind === 'Remote' ? '127.0.0.1' : 'db.internal'} /></label>
         <label>{draft.kind === 'Remote' ? 'Local target port' : 'Remote target port'}<input type="number" min="1" max="65535" step="1" required bind:value={draft.target_port} /></label>
       {/if}
-      <label class="check full"><input type="checkbox" bind:checked={draft.auto_start} /><span>Auto-start when TunnelWarden opens<small>Automatically retries failed starts. Requires a previously verified host key.</small></span></label>
+      <label class="check full"><input type="checkbox" bind:checked={draft.auto_start} /><span>Auto-start when TunnelWarden starts<small>Requires a verified host key. Encrypted key files need manual unlock after each app restart, or use an external SSH agent.</small></span></label>
     </div>
     {#if error}<p class="error" role="alert">{error}</p>{/if}
     {#if tunnel}<p class="hint">Saving an edit stops this tunnel. Start it again when you are ready.</p>{/if}

@@ -199,3 +199,13 @@ wrong-passphrase retry/cancel, fresh-session unattended rejection, successful
 host testing without listener creation, an active tunnel surviving a test,
 redacted export and explicit server refusal. `fmt/check/test/clippy` and
 boundary scan all pass. Fixture bcrypt dependency is pinned for CI parity.
+
+### v0.2 IPC/UI gate — passed
+
+Saved host rows expose Test connection / Cancel test and precise test results.
+Encrypted files open a password-only modal with wrong-passphrase retry; native
+Save As exports a structured JSON error report. Remote configuration explains
+server policy and running remote rules state that external reachability is
+unverified. `scripts/check.ps1 -Frontend` passed all Rust gates, 26 + 11 tests,
+Svelte checks (zero warnings) and production UI build. Native lifecycle and
+end-to-end window acceptance are next.

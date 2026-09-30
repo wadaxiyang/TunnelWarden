@@ -37,6 +37,7 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .max_file_size(1_000_000)
@@ -70,6 +71,16 @@ pub fn run() {
                 }
             });
             let mut logs = service.logs.subscribe();
+            let mut key_prompts = service.prompts.key_subscribe();
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                while key_prompts.changed().await.is_ok() {
+                    let _ = handle.emit(
+                        "tunnelwarden://key-passphrase",
+                        key_prompts.borrow_and_update().clone(),
+                    );
+                }
+            });
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 loop {
@@ -121,7 +132,12 @@ pub fn run() {
             commands::get_host_key_prompts,
             commands::respond_host_key,
             commands::open_source,
-            commands::quit_app
+            commands::quit_app,
+            commands::test_host,
+            commands::cancel_host_test,
+            commands::get_key_passphrase_prompts,
+            commands::respond_key_passphrase,
+            commands::export_error_logs
         ])
         .build(context)
         .expect("error while building TunnelWarden");

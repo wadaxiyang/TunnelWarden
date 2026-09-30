@@ -62,3 +62,11 @@ Stop/Delete wait for any attached forward's explicit cancellation. Save Tunnel
 stops the old runtime before persisting the edited rule. Editing an SSH host
 requires its own and dependent jump-route connections to be idle. Password input
 is accepted only by save_host, stored by the OS, and never returned by queries.
+
+## v0.2 additions
+
+- `test_host(host_id) -> HostTestResult`, `cancel_host_test(host_id)`.
+- `get_key_passphrase_prompts()`, `respond_key_passphrase(prompt_id, passphrase | null)`;
+  `tunnelwarden://key-passphrase` emits questions only, never the response/secret.
+- `export_error_logs() -> string | null`: native Save As; returns the saved path
+  or null on cancellation. No arbitrary frontend-supplied file path is accepted.

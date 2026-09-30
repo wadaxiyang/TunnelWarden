@@ -23,7 +23,7 @@
       <label>Username<input bind:value={draft.username} required autocomplete="off" placeholder="deploy" /></label>
       <label>Authentication method<select bind:value={draft.auth_method}><option value="Agent">SSH agent</option><option value="Key">Private key file</option><option value="Password">Password</option><option value="Auto">Automatic (key / agent / password)</option></select></label>
       {#if draft.auth_method === 'Key' || draft.auth_method === 'Auto'}
-        <label class="full">Private key file<input bind:value={draft.identity_file} required={draft.auth_method === 'Key'} placeholder="C:\Users\you\.ssh\id_ed25519" /><small>OpenSSH / PEM file. For a passphrase-protected key, load it into your SSH agent and select SSH agent.</small></label>
+        <label class="full">Private key file<input bind:value={draft.identity_file} required={draft.auth_method === 'Key'} placeholder="C:\Users\you\.ssh\id_ed25519" /><small>OpenSSH / PEM / PuTTY PPK file. Encrypted keys ask for a passphrase when you test or connect. Unlock lasts until the app quits; the passphrase is never saved.</small></label>
       {/if}
       {#if draft.auth_method !== 'Agent'}
         <label class="full">{draft.has_password ? 'Replace stored password (optional)' : 'Password'}<input type="password" bind:value={password} autocomplete="new-password" disabled={clearPassword} required={draft.auth_method === 'Password' && !draft.has_password && !clearPassword} /><small>{draft.has_password ? 'Leave blank to keep the password saved in Windows Credential Manager.' : 'Stored in Windows Credential Manager, never in the configuration file.'}</small></label>
