@@ -98,3 +98,20 @@ broker with per-question IDs and persistent consent; unattended connections
 remain strict. Cancellation dismisses a stopped host's prompts. Key files are
 read as supplied; encrypted keys should be loaded into ssh-agent (the pinned
 engine accepts decrypted PEM via KeyMaterial). No new key decryption is added.
+
+## H. v0.2.0 adapters (2026-09-30)
+
+- Add `oryxis-vault` at the SAME immutable SHA. Call `import_key` unchanged,
+  as upstream `dispatch_keys/import.rs` does. No vault database, new crypto,
+  or persistent unlocked keys: only per-process zeroizing key cache. Identity
+  edits invalidate that host cache; changed file contents bypass cached keys.
+- Host test calls the existing `SshEngine::connect_forward_conn`, then drops
+  the connection without attaching a rule. Scoped prompts/cancellation are
+  TunnelWarden UI orchestration, separate from forwarding runtime intent.
+- Copy `crates/oryxis-app/src/session_redact.rs` to the core with its full
+  regression tests, source/header/date. Only rustfmt changes to its logic.
+  Structured log input and diagnostic report strings use `redact_command`.
+- Remote attachment still calls upstream `ForwardConn::attach`; application
+  error context preserves the returned engine message and adds policy hints.
+
+This supersedes section G's v0.1 encrypted-key/agent-only limitation.

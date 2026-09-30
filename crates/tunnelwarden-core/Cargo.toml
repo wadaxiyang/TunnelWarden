@@ -7,6 +7,9 @@ license.workspace = true
 [dependencies]
 oryxis-core.workspace = true
 oryxis-ssh.workspace = true
+oryxis-vault.workspace = true
+zeroize = "1"
+regex = "1"
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -7,6 +7,6 @@ foreach ($manifest in @('src-tauri/Cargo.toml', 'crates/tunnelwarden-core/Cargo.
     if ((Get-Content $manifest -Raw) -notmatch ('(?m)^version = "' + [regex]::Escape($version) + '"\r?$')) { throw "Version mismatch: $manifest" }
 }
 $pin = '16ad2af83b424780ff60b6420a6c20a3b30c7143'
-if (@(Select-String -Path Cargo.toml -Pattern ('rev = "' + $pin + '"')).Count -ne 2) { throw 'Oryxis pin changed' }
+if (@(Select-String -Path Cargo.toml -Pattern ('rev = "' + $pin + '"')).Count -ne 3) { throw 'Oryxis pin changed' }
 if ((Get-Content Cargo.lock -Raw) -notmatch $pin) { throw 'Oryxis lock revision missing' }
 Write-Host "Verified $Tag and Oryxis $pin"

@@ -461,3 +461,141 @@ async fn tauri_facing_service_crud_start_stop_restart_and_config_reload() {
     assert!(restored.list_hosts().unwrap().is_empty());
     restored.runtime.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn encrypted_key_host_test_cancel_retry_cache_and_report_are_isolated() {
+    let fixture = Fixture::start();
+    let mut host = fixture.connection();
+    let dir = tempfile::tempdir().unwrap();
+    let key_path = dir.path().join("encrypted.key");
+    std::fs::write(&key_path, &fixture.info.encrypted_private_key).unwrap();
+    host.auth_method = AuthMethod::Key;
+    host.identity_file = Some(key_path.to_string_lossy().into_owned());
+    let r = rule(&host, ForwardKind::Local).await;
+    let store = Arc::new(ConfigStore::open(dir.path().join("config.json")).unwrap());
+    store
+        .update(|c| {
+            c.hosts.push(host.clone());
+            c.tunnels.push(r.clone());
+            c.known_hosts.push(KnownHost::new(
+                "127.0.0.1",
+                fixture.info.port,
+                "ssh-ed25519",
+                &fixture.info.fingerprint,
+            ));
+            Ok(())
+        })
+        .unwrap();
+    let service = AppService::new(store.clone(), Arc::new(TestSecrets::default()));
+    let mut questions = service.prompts.key_subscribe();
+    let run_test = || {
+        let s = service.clone();
+        let id = host.id;
+        tokio::spawn(async move { s.test_host(id).await })
+    };
+    let cancelled = run_test();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        questions.wait_for(|q| !q.is_empty()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    service.cancel_host_test(host.id);
+    assert!(cancelled.await.unwrap().unwrap_err().contains("cancelled"));
+    assert!(service.prompts.key_snapshot().is_empty());
+    let test = run_test();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        questions.wait_for(|q| !q.is_empty()),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let first = service.prompts.key_snapshot()[0].id;
+    service
+        .prompts
+        .respond_key(first, Some("wrong passphrase".into()))
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        questions.wait_for(|q| q.iter().any(|p| p.error.is_some())),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let retry = service.prompts.key_snapshot()[0].clone();
+    assert_ne!(first, retry.id);
+    service
+        .prompts
+        .respond_key(retry.id, Some("fixture-key-passphrase".into()))
+        .unwrap();
+    assert!(test.await.unwrap().unwrap().message.contains("not tested"));
+    assert_eq!(
+        service.get_runtime_snapshot().tunnels[0].status,
+        TunnelStatus::Stopped
+    );
+    assert_released(r.listen_port).await;
+    service.start_tunnel(r.id).await.unwrap();
+    wait_status(&service.runtime, r.id, TunnelStatus::Running).await;
+    assert!(service.test_host(host.id).await.is_ok());
+    service.cancel_ui_questions();
+    let mut stream = TcpStream::connect(("127.0.0.1", r.listen_port))
+        .await
+        .unwrap();
+    banner(&mut stream).await;
+    service
+        .logs
+        .push("error", None, "password=never-export-this-value");
+    service
+        .logs
+        .push("error", None, fixture.info.private_key.clone());
+    let report = service.diagnostic_report().unwrap();
+    let json: serde_json::Value = serde_json::from_str(&report).unwrap();
+    assert!(json["errors"].as_array().unwrap().len() >= 2);
+    assert!(!report.contains("never-export-this-value"));
+    assert!(!report.contains("fixture-key-passphrase"));
+    assert!(!report.contains("BEGIN OPENSSH PRIVATE KEY"));
+    let saved = std::fs::read_to_string(store.path()).unwrap();
+    assert!(!saved.contains("fixture-key-passphrase"));
+    assert!(!saved.contains("PRIVATE KEY"));
+    service.runtime.shutdown().await.unwrap();
+    // A fresh process/session must ask again; unattended startup never prompts.
+    let fresh = ApplicationDialer {
+        store,
+        secrets: Arc::new(TestSecrets::default()),
+        prompts: Arc::new(PromptBroker::new(Arc::new(
+            ConfigStore::open(dir.path().join("config.json")).unwrap(),
+        ))),
+    };
+    assert!(
+        fresh
+            .connect(host.id, true)
+            .await
+            .err()
+            .unwrap()
+            .contains("locked")
+    );
+    assert!(fresh.prompts.key_snapshot().is_empty());
+}
+
+#[tokio::test]
+async fn remote_policy_refusal_preserves_engine_error_and_explains_server_requirements() {
+    let fixture = Fixture::start();
+    let host = fixture.connection();
+    let mut r = rule(&host, ForwardKind::Remote).await;
+    r.listen_host = "0.0.0.0".into(); // fixture deliberately refuses external listeners
+    let dialer = Arc::new(TestDialer {
+        connection: host,
+        engine: fixture.engine(),
+        calls: AtomicUsize::new(0),
+    });
+    let runtime = TunnelRuntimeManager::new(dialer, vec![r.clone()], false);
+    runtime.start(r.id).await.unwrap();
+    wait_status(&runtime, r.id, TunnelStatus::Error).await;
+    let error = runtime.snapshot().tunnels[0].last_error.clone().unwrap();
+    assert!(error.contains("GatewayPorts"));
+    assert!(error.contains("0.0.0.0"));
+    assert!(error.contains("not established"));
+    runtime.shutdown().await.unwrap();
+}

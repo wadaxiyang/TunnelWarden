@@ -42,6 +42,7 @@ async def main():
         "port": server.get_port(),
         "fingerprint": host_key.get_fingerprint(),
         "private_key": client_key.export_private_key().decode(),
+        "encrypted_private_key": client_key.export_private_key(passphrase="fixture-key-passphrase").decode(),
     }), flush=True)
     await asyncio.Future()
 

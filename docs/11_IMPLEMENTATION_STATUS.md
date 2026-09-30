@@ -176,3 +176,26 @@ the authoritative phase commit ledger (a commit cannot embed its own SHA).
 | 6 — desktop shell | `d5457a4cf8d44c4e4c9995a4df4c6ad379add402` |
 | 7 — acceptance/release | `5d6d1c9df8a33df949dfeaf5fd5804b81046550a` |
 | Final runtime regression fix | `6cebb10d0106bfaf274189dd48126d69478d63f1` |
+
+## v0.2.0 — user-authorized scope (2026-09-30)
+
+The original Phase order remains: upstream/API review → core adapters and
+regression harness → IPC/UI → tray/window lifecycle → release acceptance.
+The user explicitly requested host connection tests, error-log export,
+encrypted-key passphrase input, remote-listener diagnostics, on-demand UI,
+and an actual v0.2.0 Windows release.
+
+- Upstream review complete: `SshEngine::connect_forward_conn` tests SSH without
+  attaching a forward; pinned `oryxis-vault::import_key` handles key decryption.
+- Core implementation in progress: isolated cancellable host tests, ephemeral
+  key unlock/cache, redacted diagnostic report, remote-policy error context.
+- UI, lifecycle, acceptance and publication pending.
+- No public reachability claim/test is inferred from forwarding success.
+
+### v0.2 core gate — passed
+
+26 unit + 11 real SSH integration tests passed, including encrypted key
+wrong-passphrase retry/cancel, fresh-session unattended rejection, successful
+host testing without listener creation, an active tunnel surviving a test,
+redacted export and explicit server refusal. `fmt/check/test/clippy` and
+boundary scan all pass. Fixture bcrypt dependency is pinned for CI parity.

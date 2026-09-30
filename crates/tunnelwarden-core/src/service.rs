@@ -26,6 +26,8 @@ pub struct AppService {
     pub logs: Arc<LogBook>,
     store: Arc<ConfigStore>,
     secrets: Arc<dyn SecretStore>,
+    dialer: Arc<ApplicationDialer>,
+    host_tests: std::sync::Mutex<HashMap<Uuid, Uuid>>,
     mutations: Mutex<()>,
 }
 impl AppService {
@@ -37,8 +39,11 @@ impl AppService {
             secrets: secrets.clone(),
             prompts: prompts.clone(),
         });
-        let runtime =
-            TunnelRuntimeManager::new(dialer, config.tunnels, config.settings.auto_reconnect);
+        let runtime = TunnelRuntimeManager::new(
+            dialer.clone(),
+            config.tunnels,
+            config.settings.auto_reconnect,
+        );
         let logs = Arc::new(LogBook::default());
         let mut updates = runtime.subscribe();
         let weak_logs = Arc::downgrade(&logs);
@@ -79,6 +84,8 @@ impl AppService {
             logs,
             store,
             secrets,
+            dialer,
+            host_tests: std::sync::Mutex::new(HashMap::new()),
             mutations: Mutex::new(()),
         })
     }
@@ -120,6 +127,121 @@ impl AppService {
     }
     pub fn get_logs(&self, filter: Option<LogFilter>) -> Vec<LogEntry> {
         self.logs.get(filter)
+    }
+
+    /// Establish/authenticate the saved route using Oryxis, then drop it without
+    /// attaching any forwarding rule. This is independent of active tunnels.
+    pub async fn test_host(&self, id: Uuid) -> Result<HostTestResult, String> {
+        let scope = Uuid::new_v4();
+        let dial = {
+            let _serial = self.mutations.lock().await;
+            if !self.store.snapshot().hosts.iter().any(|h| h.id == id) {
+                return Err("SSH host not found".into());
+            }
+            let mut tests = self.host_tests.lock().unwrap_or_else(|p| p.into_inner());
+            if tests.contains_key(&id) {
+                return Err("A test is already running for this host".into());
+            }
+            tests.insert(id, scope);
+            self.dialer.connect_scoped(id, false, scope)
+        };
+        struct TestGuard<'a> {
+            service: &'a AppService,
+            id: Uuid,
+            scope: Uuid,
+        }
+        impl Drop for TestGuard<'_> {
+            fn drop(&mut self) {
+                self.service.prompts.cancel_for_host(self.scope);
+                self.service
+                    .host_tests
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(&self.id);
+            }
+        }
+        let _guard = TestGuard {
+            service: self,
+            id,
+            scope,
+        };
+        let start = std::time::Instant::now();
+        match dial.await {
+            Ok(connection) => {
+                drop(connection);
+                let message = "SSH connection and authentication succeeded. Forwarding permission, destination services and external reachability were not tested.".to_string();
+                self.logs
+                    .push("info", None, format!("Host test {id}: {message}"));
+                Ok(HostTestResult {
+                    elapsed_ms: start.elapsed().as_millis() as u64,
+                    message,
+                })
+            }
+            Err(error) => {
+                self.logs
+                    .push("error", None, format!("Host test {id}: {error}"));
+                Err(error)
+            }
+        }
+    }
+    pub fn cancel_host_test(&self, id: Uuid) {
+        if let Some(scope) = self
+            .host_tests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&id)
+        {
+            self.prompts.cancel_for_host(*scope);
+        }
+    }
+    pub fn cancel_ui_questions(&self) {
+        self.prompts.cancel_interactive();
+        for scope in self
+            .host_tests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .values()
+        {
+            self.prompts.cancel_for_host(*scope);
+        }
+    }
+    fn ensure_not_testing(&self, id: Uuid) -> Result<(), String> {
+        if self
+            .host_tests
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains_key(&id)
+        {
+            Err("Cancel the SSH host test before editing this host or its jump route".into())
+        } else {
+            Ok(())
+        }
+    }
+    pub fn diagnostic_report(&self) -> Result<String, String> {
+        // Deliberately no configuration, identity files, credentials or key cache.
+        let entries = self.logs.get(None);
+        let report = serde_json::json!({
+            "application": "TunnelWarden", "version": env!("CARGO_PKG_VERSION"),
+            "oryxis_commit": "16ad2af83b424780ff60b6420a6c20a3b30c7143",
+            "created_at": chrono::Utc::now().to_rfc3339(),
+            "os": std::env::consts::OS, "architecture": std::env::consts::ARCH,
+            "reachability": "Established forwarding does not establish external/public reachability",
+            "runtime": self.runtime.snapshot(),
+            "errors": entries.iter().filter(|e| e.level == "error").collect::<Vec<_>>(),
+            "recent_activity": entries,
+        });
+        // Scrub string values before JSON serialization so PEM/newlines still match.
+        fn redact(value: &mut serde_json::Value) {
+            match value {
+                serde_json::Value::String(s) => *s = crate::session_redact::redact_command(s),
+                serde_json::Value::Array(a) => a.iter_mut().for_each(redact),
+                serde_json::Value::Object(o) => o.values_mut().for_each(redact),
+                _ => {}
+            }
+        }
+        let mut report = report;
+        redact(&mut report);
+        serde_json::to_string_pretty(&report).map_err(|e| e.to_string())
     }
 
     pub async fn save_host(&self, input: SaveHost) -> Result<HostDto, String> {
@@ -178,6 +300,7 @@ impl AppService {
                 .contains(&h.id)
             {
                 self.runtime.ensure_host_idle(target.id).await?;
+                self.ensure_not_testing(target.id)?;
             }
         }
         let old_password = self.secrets.get(h.id)?;
@@ -196,6 +319,7 @@ impl AppService {
         }
         self.logs
             .push("info", None, format!("Saved SSH host {}", conn.label));
+        self.prompts.forget_key(h.id);
         self.host_dto(&conn)
     }
     fn restore_secret(&self, id: Uuid, value: Option<&str>) -> Result<(), String> {
@@ -216,6 +340,7 @@ impl AppService {
             );
         }
         self.runtime.ensure_host_idle(id).await?;
+        self.ensure_not_testing(id)?;
         let old = self.secrets.get(id)?;
         self.secrets.delete(id)?;
         if let Err(e) = self.store.update(|c| {
@@ -227,6 +352,7 @@ impl AppService {
             return Err(e);
         }
         self.logs.push("info", None, "Deleted SSH host");
+        self.prompts.forget_key(id);
         Ok(())
     }
     pub async fn save_tunnel(&self, dto: TunnelDto) -> Result<TunnelDto, String> {

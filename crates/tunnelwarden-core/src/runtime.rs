@@ -439,7 +439,11 @@ impl RuntimeState {
                     .attach(&rule)
                     .await
                     .map(Arc::new)
-                    .map_err(|e| e.to_string())
+                    .map_err(|e| {
+                        if rule.kind == oryxis_core::models::port_forward_rule::ForwardKind::Remote {
+                            format!("Remote listener {}:{} was not established: {e}. Check server AllowTcpForwarding, PermitListen, GatewayPorts and port conflicts. The SSH server may not report the exact policy that refused the request.", rule.listen_host, rule.listen_port)
+                        } else { e.to_string() }
+                    })
             },
             move |res| Message::Started(id, res),
         )

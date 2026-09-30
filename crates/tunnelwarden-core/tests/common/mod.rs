@@ -20,6 +20,7 @@ pub struct FixtureInfo {
     pub port: u16,
     pub fingerprint: String,
     pub private_key: String,
+    pub encrypted_private_key: String,
 }
 
 pub struct Fixture {

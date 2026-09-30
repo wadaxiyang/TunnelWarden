@@ -10,6 +10,7 @@ license = "AGPL-3.0-or-later"
 # Upstream SSH engine. Do not replace with a handwritten equivalent.
 oryxis-core = { git = "https://github.com/wilsonglasser/oryxis.git", rev = "16ad2af83b424780ff60b6420a6c20a3b30c7143", package = "oryxis-core" }
 oryxis-ssh = { git = "https://github.com/wilsonglasser/oryxis.git", rev = "16ad2af83b424780ff60b6420a6c20a3b30c7143", package = "oryxis-ssh" }
+oryxis-vault = { git = "https://github.com/wilsonglasser/oryxis.git", rev = "16ad2af83b424780ff60b6420a6c20a3b30c7143", package = "oryxis-vault" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde = { version = "1", features = ["derive"] }

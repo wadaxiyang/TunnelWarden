@@ -55,6 +55,21 @@ pub struct HostKeyPrompt {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct KeyPassphrasePrompt {
+    pub id: Uuid,
+    pub host_id: Uuid,
+    pub host_name: String,
+    pub identity_file: String,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostTestResult {
+    pub elapsed_ms: u64,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HostDto {
     pub id: Uuid,
     pub name: String,

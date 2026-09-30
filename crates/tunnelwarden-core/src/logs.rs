@@ -23,7 +23,7 @@ impl LogBook {
             timestamp: chrono::Utc::now().to_rfc3339(),
             level: level.into(),
             tunnel_id,
-            message: message.into(),
+            message: crate::session_redact::redact_command(&message.into()),
         };
         let mut entries = self.entries.lock().unwrap_or_else(|p| p.into_inner());
         if entries.len() == 1000 {

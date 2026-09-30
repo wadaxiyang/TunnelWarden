@@ -11,3 +11,5 @@ pub mod logs;
 pub mod runtime;
 pub mod service;
 pub mod storage;
+
+mod session_redact;
