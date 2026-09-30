@@ -104,6 +104,18 @@ pub fn quit_app(app: tauri::AppHandle) {
 }
 
 #[tauri::command]
+pub fn ui_ready(app: tauri::AppHandle) {
+    use tauri::Manager;
+    app.state::<crate::ui::UiState>()
+        .ready
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+}
+#[tauri::command]
+pub async fn close_ui(app: tauri::AppHandle) -> Result<(), String> {
+    crate::ui::close(&app).await
+}
+
+#[tauri::command]
 pub async fn test_host(service: Service<'_>, host_id: Uuid) -> Result<HostTestResult, String> {
     service.test_host(host_id).await
 }

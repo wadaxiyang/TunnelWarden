@@ -44,3 +44,15 @@ server/client API to load one fresh test key into a unique pipe. Production auth
 still calls Oryxis, including discovery/signing. No custom agent protocol was
 written. Boundary checks are unchanged; russh is a dev-dependency only. No OS
 agent service, personal keys or agent configuration is modified by this test.
+
+## v0.2 native acceptance (2026-09-30)
+
+In addition to the original suite, `tests/ui-v02.mjs` exercises encrypted-key
+host testing with a wrong then correct passphrase, fingerprint verification,
+remote-listen help and a live forwarded SSH banner. Run it against the isolated
+Tauri application with an AsyncSSH fixture writing `.upstream/ui-fixture.json`.
+After native Alt-F4, verify no WebView2 command line contains the smoke test
+identifier and independently read the listener's SSH banner. Launch the same
+executable again and run `node tests/ui-v02.mjs reopen`; run its `cleanup` mode
+when finished. Native Save As export and unsaved-draft close confirmation were
+also exercised. A fresh `--autostart` launch created no WebView2 process.

@@ -53,3 +53,14 @@ error
 ```
 
 Do not introduce generation/attempt/revision machinery unless a concrete regression proves Oryxis' simpler runtime model insufficient.
+
+## v0.2 window ownership
+
+The Rust AppService and tray are process-scoped. Main window config is a
+creation template (`create: false`), not a startup WebView. `ui::show` serializes
+creation on an async thread as required by Tauri/WebView2. Close destroys the
+window; implicit last-window exit is prevented. Explicit quit stops SSH first.
+Launch-at-login is headless. Opening/reopening the interface does not rerun
+runtime auto-start. New manual authentication questions can summon the UI;
+unattended retry remains strict and never prompts. Pending questions/tests
+are cancelled when the interface is destroyed; established tunnels continue.

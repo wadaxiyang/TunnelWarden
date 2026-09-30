@@ -5,6 +5,7 @@
 
 mod commands;
 mod tray;
+mod ui;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -27,6 +28,7 @@ pub fn run() {
         .unwrap_or_else(|| "TunnelWarden".into());
     let app = tauri::Builder::default()
         .manage(ExitState::default())
+        .manage(ui::UiState::default())
         .plugin(tauri_plugin_single_instance::init(|app, _, _| {
             tray::show(app)
         }))
@@ -64,6 +66,7 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 while prompts.changed().await.is_ok() {
+                    ui::show(&handle, true);
                     let _ = handle.emit(
                         "tunnelwarden://host-key",
                         prompts.borrow_and_update().clone(),
@@ -75,6 +78,7 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 while key_prompts.changed().await.is_ok() {
+                    ui::show(&handle, true);
                     let _ = handle.emit(
                         "tunnelwarden://key-passphrase",
                         key_prompts.borrow_and_update().clone(),
@@ -98,6 +102,9 @@ pub fn run() {
             });
             app.manage(service.clone());
             tray::install(app.handle())?;
+            if !std::env::args().any(|arg| arg == "--autostart") {
+                tray::show(app.handle());
+            }
             log::info!("TunnelWarden 0.1.0 starting; Oryxis 16ad2af");
             tauri::async_runtime::spawn(async move {
                 if let Err(e) = service.runtime.auto_start().await {
@@ -108,10 +115,16 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let service = window.state::<Arc<AppService>>();
-                if service.get_settings().close_to_tray {
-                    api.prevent_close();
-                    let _ = window.hide();
+                api.prevent_close();
+                if window.state::<ui::UiState>().ready.load(Ordering::SeqCst) {
+                    let _ = window.emit("tunnelwarden://close-requested", ());
+                } else {
+                    let app = window.app_handle().clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(e) = ui::close(&app).await {
+                            log::error!("Close interface: {e}");
+                        }
+                    });
                 }
             }
         })
@@ -137,12 +150,19 @@ pub fn run() {
             commands::cancel_host_test,
             commands::get_key_passphrase_prompts,
             commands::respond_key_passphrase,
-            commands::export_error_logs
+            commands::export_error_logs,
+            commands::ui_ready,
+            commands::close_ui
         ])
         .build(context)
         .expect("error while building TunnelWarden");
     app.run(|handle, event| {
-        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+        if let tauri::RunEvent::ExitRequested { api, code, .. } = event {
+            // Destroying the last UI window is not an instruction to stop SSH.
+            if code.is_none() {
+                api.prevent_exit();
+                return;
+            }
             let exiting = handle.state::<ExitState>();
             if !exiting.ready.load(Ordering::SeqCst) {
                 api.prevent_exit();
@@ -150,6 +170,7 @@ pub fn run() {
                     let service = handle.state::<Arc<AppService>>().inner().clone();
                     let handle = handle.clone();
                     tauri::async_runtime::spawn(async move {
+                        service.cancel_ui_questions();
                         if let Err(e) = service.runtime.shutdown().await {
                             log::error!("Shutdown: {e}");
                         }

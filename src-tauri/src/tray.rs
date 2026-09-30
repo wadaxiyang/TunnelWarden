@@ -8,11 +8,7 @@ use tauri::{
 use tunnelwarden_core::service::AppService;
 
 pub fn show(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.unminimize();
-        let _ = window.set_focus();
-    }
+    crate::ui::show(app, false);
 }
 pub fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
     let show_item = MenuItem::with_id(app, "show", "Open TunnelWarden", true, None::<&str>)?;

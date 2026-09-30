@@ -18,6 +18,7 @@
   let keyQuestions = $state<KeyPassphrasePrompt[]>([]);
   let hostTests = $state<Record<string, { running: boolean; error: boolean; message: string }>>({});
   let exportPath = $state('');
+  let closeConfirmation = $state(false); let savedSettings = $state('');
   let loading = $state(true); let error = $state(''); let busy = $state<string | null>(null);
   let tunnelEditor = $state(false); let hostEditor = $state(false);
   let editingTunnel = $state<Tunnel | null>(null); let editingHost = $state<Host | null>(null);
@@ -41,10 +42,13 @@
           listen<LogEntry>('tunnelwarden://log', e => logs = [...logs, e.payload].slice(-1000)),
           listen<HostKeyPrompt[]>('tunnelwarden://host-key', e => questions = e.payload),
           listen<KeyPassphrasePrompt[]>('tunnelwarden://key-passphrase', e => keyQuestions = e.payload),
+          listen('tunnelwarden://close-requested', () => requestClose()),
         ]);
         if (disposed) { handlers.forEach(f => f()); return; } unlisten.push(...handlers);
         await refresh();
         [settings, logs, questions, keyQuestions] = await Promise.all([invoke<Settings>('get_settings'), invoke<LogEntry[]>('get_logs'), invoke<HostKeyPrompt[]>('get_host_key_prompts'), invoke<KeyPassphrasePrompt[]>('get_key_passphrase_prompts')]);
+        savedSettings = JSON.stringify(settings);
+        await invoke('ui_ready');
       } catch (e) { error = errorText(e); } finally { loading = false; }
     }
     void boot(); return () => { disposed = true; unlisten.forEach(f => f()); };
@@ -55,6 +59,14 @@
       const result = await invoke<HostTestResult>('test_host', { hostId: id });
       hostTests[id] = { running: false, error: false, message: `${result.message} (${result.elapsed_ms} ms)` };
     } catch (e) { hostTests[id] = { running: false, error: true, message: errorText(e) }; }
+  }
+  function requestClose() {
+    if (hostEditor || tunnelEditor || deletion || busy || questions.length || keyQuestions.length || Object.values(hostTests).some(t => t.running) || JSON.stringify(settings) !== savedSettings) {
+      closeConfirmation = true;
+    } else { void closeUi(); }
+  }
+  async function closeUi() {
+    try { await invoke('close_ui'); } catch (e) { error = errorText(e); closeConfirmation = false; }
   }
   async function cancelTest(id: string) {
     try { await invoke('cancel_host_test', { hostId: id }); } catch (e) { error = errorText(e); }
@@ -78,7 +90,7 @@
   }
   async function saveSettings() {
     busy = 'settings'; error = ''; settingsSaved = false;
-    try { await invoke('set_settings', { settings }); settingsSaved = true; }
+    try { await invoke('set_settings', { settings }); settingsSaved = true; savedSettings = JSON.stringify(settings); }
     catch (e) { error = errorText(e); } finally { busy = null; }
   }
   async function respond(question: HostKeyPrompt, trust: boolean) {
@@ -135,8 +147,8 @@
       {#if !visibleLogs.length}<div class="empty"><h2>No activity to show</h2><p>Tunnel state changes and errors appear here.</p></div>{:else}<div class="log-list" aria-live="polite">{#each visibleLogs as entry (entry.id)}<div class="log-row"><time datetime={entry.timestamp}>{new Date(entry.timestamp).toLocaleTimeString()}</time><span class="log-level" class:error-level={entry.level === 'error'}>{entry.level}</span><div>{#if entry.tunnel_id}<strong>{tunnels.find(t => t.id === entry.tunnel_id)?.name ?? 'Deleted tunnel'} · </strong>{/if}{entry.message}</div></div>{/each}</div>{/if}
     {:else if page === 'Settings'}
       <form class="settings" onsubmit={e => { e.preventDefault(); void saveSettings(); }}>
-        <section class="settings-section"><h2>Startup & window</h2><label class="check"><input type="checkbox" bind:checked={settings.launch_at_login} onchange={() => settingsSaved = false} /><span>Launch at Windows login<small>Starts TunnelWarden for your Windows account.</small></span></label><label class="check"><input type="checkbox" bind:checked={settings.close_to_tray} onchange={() => settingsSaved = false} /><span>Keep running when the window closes<small>Use the tray icon to reopen the window or quit and stop all tunnels.</small></span></label></section>
-        <section class="settings-section"><h2>Recovery</h2><label class="check"><input type="checkbox" bind:checked={settings.auto_reconnect} onchange={() => settingsSaved = false} /><span>Reconnect after a connection drops<small>Retries at 15, 30, 60, then 120 seconds. Manually stopping a tunnel cancels retry.</small></span></label><p class="hint">Auto-start is set per tunnel. Enabled tunnels start each time the app opens and retry failed starts independently of this setting.</p></section>
+        <section class="settings-section"><h2>Startup & window</h2><label class="check"><input type="checkbox" bind:checked={settings.launch_at_login} onchange={() => settingsSaved = false} /><span>Launch at Windows login<small>Starts the Rust runtime and tray without opening the interface.</small></span></label><label class="check"><input type="checkbox" bind:checked={settings.close_to_tray} onchange={() => settingsSaved = false} /><span>Keep running when the window closes<small>Releases the interface and its WebView. The tray can recreate it or quit and stop tunnels.</small></span></label></section>
+        <section class="settings-section"><h2>Recovery</h2><label class="check"><input type="checkbox" bind:checked={settings.auto_reconnect} onchange={() => settingsSaved = false} /><span>Reconnect after a connection drops<small>Retries at 15, 30, 60, then 120 seconds. Manually stopping a tunnel cancels retry.</small></span></label><p class="hint">Auto-start is set per tunnel. Enabled tunnels start when the app process starts and retry failed starts independently of this setting.</p></section>
         <footer><span class="success" role="status">{settingsSaved ? 'Settings saved' : ''}</span><button class="primary" disabled={!native || busy === 'settings'}>{busy === 'settings' ? 'Saving…' : 'Save settings'}</button></footer>
       </form>
     {:else}
@@ -151,3 +163,4 @@
 {#if questions.length}{@const q = questions[0]}<Modal title={q.old_fingerprint ? 'SSH host key has changed' : 'Verify SSH host key'} onclose={() => void respond(q, false)}><p>{q.old_fingerprint ? 'The server presented a different host key. Confirm the change with the server administrator before continuing.' : 'Verify this fingerprint with the server administrator or another trusted source before connecting.'}</p><dl><dt>SSH server</dt><dd>{endpoint(q.hostname, q.port)}</dd><dt>Algorithm</dt><dd>{q.key_type}</dd><dt>Fingerprint</dt><dd><code class="fingerprint">{q.fingerprint}</code></dd>{#if q.old_fingerprint}<dt>Previously trusted</dt><dd><code class="fingerprint">{q.old_fingerprint}</code></dd>{/if}</dl>{#if error}<p class="error" role="alert">{error}</p>{/if}<footer><button disabled={busy === q.id} onclick={() => respond(q, false)}>Reject</button><button class:danger={!!q.old_fingerprint} class:primary={!q.old_fingerprint} disabled={busy === q.id} onclick={() => respond(q, true)}>Trust and connect</button></footer></Modal>{/if}
 
 {#if keyQuestions.length}{#key keyQuestions[0].id}<KeyUnlock question={keyQuestions[0]} />{/key}{/if}
+{#if closeConfirmation}<Modal title="Close the interface?" onclose={() => closeConfirmation = false}><p>Unsaved edits will be discarded. Connection tests and unanswered authentication questions will be cancelled.</p><p>{settings.close_to_tray ? 'Running tunnels continue in the background. Open the tray icon to create the interface again.' : 'Your saved setting determines whether the app keeps running or quits and stops tunnels.'}</p><footer><button onclick={() => closeConfirmation = false}>Keep editing</button><button class="primary" onclick={closeUi}>Close interface</button></footer></Modal>{/if}

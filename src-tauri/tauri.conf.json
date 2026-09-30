@@ -12,6 +12,8 @@
   "app": {
     "windows": [
       {
+        "label": "main",
+        "create": false,
         "title": "TunnelWarden",
         "width": 1080,
         "height": 720,

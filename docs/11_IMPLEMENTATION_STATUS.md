@@ -190,6 +190,7 @@ and an actual v0.2.0 Windows release.
 - Core implementation in progress: isolated cancellable host tests, ephemeral
   key unlock/cache, redacted diagnostic report, remote-policy error context.
 - UI, lifecycle, acceptance and publication pending.
+- Subsequent gates below supersede the initial pending status.
 - No public reachability claim/test is inferred from forwarding success.
 
 ### v0.2 core gate — passed
@@ -209,3 +210,23 @@ server policy and running remote rules state that external reachability is
 unverified. `scripts/check.ps1 -Frontend` passed all Rust gates, 26 + 11 tests,
 Svelte checks (zero warnings) and production UI build. Native lifecycle and
 end-to-end window acceptance are next.
+
+### v0.2 disposable UI/lifecycle gate — passed
+
+Configuration sets `create: false`. Normal launch/tray/single-instance opens a
+serialized asynchronous window; `--autostart` creates only runtime + tray.
+Close destroys the native WebView and keeps the runtime alive; explicit Quit
+still awaits runtime shutdown. Unsaved forms/settings and active questions
+receive a close confirmation. Reopening fetches state and subscriptions anew.
+
+- All Rust checks, 26 unit + 11 SSH tests, frontend check/build pass.
+- Real Tauri CRUD suite and `tests/ui-v02.mjs` pass.
+- Native Save As exported valid JSON; no fixture passphrase/private PEM.
+- Native Alt-F4: smoke-instance WebView2 process count became **0**; same Rust
+  PID stayed alive; actual SSH banner still traversed the running local tunnel.
+- Second launch recreated the UI in the original process, displayed Running,
+  and successfully tested the host using the session key cache.
+- Fresh `--autostart` process had **0** matching WebView2 processes; subsequent
+  launch created a working UI. Debug cold-background working set was about
+  25 MB (measurement only, not a release memory guarantee).
+- Native close with an unsaved form offered Keep editing; draft was retained.

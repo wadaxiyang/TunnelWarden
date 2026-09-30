@@ -5,7 +5,7 @@
   onMount(() => dialog.showModal());
 </script>
 
-<dialog bind:this={dialog} oncancel={onclose} aria-label={title}>
+<dialog bind:this={dialog} oncancel={e => { e.preventDefault(); onclose(); }} aria-label={title}>
   <header class="modal-header"><h2>{title}</h2><button class="icon-button" aria-label="Close dialog" onclick={onclose}>×</button></header>
   {@render children()}
 </dialog>
