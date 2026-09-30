@@ -1,6 +1,6 @@
 # Implementation status
 
-Current target: **TunnelWarden 0.2.1 — release acceptance in progress**, Windows x64.
+Current release: **TunnelWarden 0.2.1 — published and verified**, Windows x64.
 Development branch: `master`. The v0.1 phase history is retained below;
 the v0.2 implementation and publication receipts follow it.
 
@@ -326,3 +326,34 @@ actual forwarding with zero smoke WebViews; reopening restored the runtime.
 Native popup rendering was visually inspected; first-show visibility and
 short-list height were hardened and retested. Ready for v0.2.1 tag workflows.
 
+
+### v0.2.1 publication receipt — complete
+
+- Release: https://github.com/wadaxiyang/TunnelWarden/releases/tag/v0.2.1
+- Published: 2026-09-30T09:07:27Z; non-draft, non-prerelease, eight assets.
+- Release/tag source: `ecb30174936f0440ee7cacec898083d4e3091254`.
+- Telemetry phase: `0862d020124e4d5f85d68c5d21c10ef097d722ad`.
+- Native shell phase: `269bce20d4cb4673b0e2bc17224248f81ea0f5c3`.
+- Final native visibility/acceptance/version: `ecb30174936f0440ee7cacec898083d4e3091254`.
+- CI: https://github.com/wadaxiyang/TunnelWarden/actions/runs/36691272004 — success.
+- Windows Release: https://github.com/wadaxiyang/TunnelWarden/actions/runs/36691274926 — success.
+- Both workflows passed 31 unit tests and 12 real SSH integration tests, full
+  Rust gates, pinned-source diff/boundary scans and frontend check/build.
+- Release built NSIS/MSI and passed installed resources, headless startup with
+  no WebView2 child and uninstall before publishing.
+- NSIS `TunnelWarden_0.2.1_x64-setup.exe`: 5,677,777 bytes.
+- MSI `TunnelWarden_0.2.1_x64_en-US.msi`: 8,384,512 bytes.
+- Other assets: source ZIP, LICENSE, NOTICE.ORYXIS, THIRD_PARTY_NOTICES.md,
+  THIRD_PARTY_LICENSES.txt and SHA256SUMS.txt.
+- All eight assets were downloaded and matched GitHub's SHA-256 digests; all
+  seven checksum entries matched actual downloaded files. Installer format
+  headers checked. Source ZIP's archive comment matches the tag, contains the
+  complete vendored source/provenance/patch, and excludes temporary fixtures.
+- Oryxis pin remains `16ad2af83b424780ff60b6420a6c20a3b30c7143`.
+- Limits: unsigned Windows x64 packages; first rate needs a sampling interval;
+  encrypted-file authentication after process restart needs manual unlock or
+  an agent; public reachability remains server/network dependent. Physical
+  Shell pointer/menu and physical multi-monitor testing were not performed;
+  native rendering, lifecycle, geometry and service paths have executable coverage.
+- This documentation-only receipt changes no release code and skips redundant
+  CI. The tag stays on the exact source built by the successful workflows.

@@ -92,3 +92,12 @@ cleaned. The actual native panel was visually inspected during the worker test.
 Headless first-show uses SetWindowPos(SWP_SHOWWINDOW | SWP_NOACTIVATE) to avoid
 ShowWindow's STARTUPINFO SW_HIDE override; tests explicitly assert visibility.
 Panel height is compact for short lists and capped with scrolling for long lists.
+
+### v0.2.1 published build
+
+Tag/source: v0.2.1 / `ecb30174936f0440ee7cacec898083d4e3091254`. CI run 36691272004 and Windows Release run
+36691274926 succeeded. Both passed 31 unit + 12 real SSH tests and all gates.
+Release installation/resources/headless-start/uninstall checks passed.
+All eight downloaded assets match GitHub digests and seven checksum entries;
+source ZIP identifies the exact tag and includes the reviewed Oryxis patch.
+Publication time: 2026-09-30T09:07:27Z.
