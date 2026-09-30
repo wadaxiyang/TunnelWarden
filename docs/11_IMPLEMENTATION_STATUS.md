@@ -1,6 +1,8 @@
 # Implementation status
 
-Target: TunnelWarden 0.1.0, Windows x64. Development branch: `master`.
+Current release: **TunnelWarden 0.2.0 — published and verified**, Windows x64.
+Development branch: `master`. The v0.1 phase history is retained below;
+the v0.2 implementation and publication receipts follow it.
 
 ## Phase 0 — upstream baseline
 
@@ -247,3 +249,32 @@ v0.2 phase ledger before tagging:
 - IPC and UI: `477e84f4bdf7475aba64af7ae832763b6106941a`.
 - Disposable UI and native acceptance: `a90a3ca776d93bc40b70ad8becd9be32652f47a0`.
 - Publication receipt will be appended only after GitHub Release/assets succeed.
+
+### v0.2.0 publication receipt — complete
+
+- Release: https://github.com/wadaxiyang/TunnelWarden/releases/tag/v0.2.0
+- Published: 2026-09-30 03:26:20 UTC (11:26:20 Asia/Shanghai); non-draft,
+  non-prerelease; eight uploaded assets.
+- Release source/tag commit: `5b051896c72cecc7f7f431534175875efc54f1e3`.
+- CI: https://github.com/wadaxiyang/TunnelWarden/actions/runs/36661515768 — success.
+- Windows Release: https://github.com/wadaxiyang/TunnelWarden/actions/runs/36661516616 — success.
+- Both workflows passed 26 unit + 11 SSH integration tests, all Cargo gates,
+  boundary scan, frontend check and build. Release built both installers and
+  passed NSIS installation, resource checks, installed headless startup with no
+  WebView2 child process, and uninstall before publication.
+- NSIS: `TunnelWarden_0.2.0_x64-setup.exe`, 5,672,945 bytes.
+- MSI: `TunnelWarden_0.2.0_x64_en-US.msi`, 8,364,032 bytes.
+- Other assets: `TunnelWarden_v0.2.0_source.zip`, `LICENSE`, `NOTICE.ORYXIS`,
+  `THIRD_PARTY_NOTICES.md`, `THIRD_PARTY_LICENSES.txt`, `SHA256SUMS.txt`.
+- All seven checksum entries match GitHub's asset digests. Downloaded checksum
+  and source ZIP hashes match too. The ZIP's Git archive comment is the exact
+  tag commit; it contains the new source and no temporary `.upstream` fixtures.
+- Oryxis core/ssh/vault remain pinned to
+  `16ad2af83b424780ff60b6420a6c20a3b30c7143`.
+- Remaining limits are documented in README/release notes: Windows x64,
+  unsigned packages, manual encrypted-key unlock after full process restart
+  (or external agent), current-session bounded report, and server/network
+  control of remote reachability.
+- This post-publication documentation receipt changes no release code and
+  skips redundant CI. The tag identifies the source tested by both successful
+  workflows; all v0.2 requested development and publication work is complete.

@@ -56,3 +56,12 @@ identifier and independently read the listener's SSH banner. Launch the same
 executable again and run `node tests/ui-v02.mjs reopen`; run its `cleanup` mode
 when finished. Native Save As export and unsaved-draft close confirmation were
 also exercised. A fresh `--autostart` launch created no WebView2 process.
+
+## v0.2 published build
+
+Tag/source: `v0.2.0` / `5b051896c72cecc7f7f431534175875efc54f1e3`.
+CI run `36661515768` and Windows Release run `36661516616` both succeeded.
+Both ran 26 unit and 11 real SSH integration tests with zero failures/ignored
+cases. Release logs confirm two bundles and installed headless startup with
+no WebView2 child. All seven published checksum entries match GitHub digests;
+the downloaded source ZIP identifies the exact release commit.
