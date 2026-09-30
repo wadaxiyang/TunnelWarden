@@ -5,6 +5,9 @@
 
 mod commands;
 mod tray;
+#[cfg(windows)]
+mod tray_panel;
+mod tray_view;
 mod ui;
 use std::sync::{
     Arc,
@@ -56,6 +59,7 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 while runtime.changed().await.is_ok() {
+                    tray::refresh(&handle);
                     let _ = handle.emit(
                         "tunnelwarden://runtime",
                         runtime.borrow_and_update().clone(),
@@ -170,6 +174,7 @@ pub fn run() {
             if !exiting.ready.load(Ordering::SeqCst) {
                 api.prevent_exit();
                 if !exiting.requested.swap(true, Ordering::SeqCst) {
+                    tray::shutdown(handle);
                     let service = handle.state::<Arc<AppService>>().inner().clone();
                     let handle = handle.clone();
                     tauri::async_runtime::spawn(async move {

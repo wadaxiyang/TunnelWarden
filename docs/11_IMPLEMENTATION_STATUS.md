@@ -294,3 +294,20 @@ payload counts are exact for Local/Remote/Dynamic, exclude SOCKS framing,
 remain isolated on a shared connection and reset on reattach. Rust fmt/check/
 test/clippy, boundary scan and full pinned-source/patch verification pass.
 
+
+### v0.2.1 native shell gate
+
+Native Win32 text panel and per-rule native Start/Stop submenus implemented.
+Panel work is demand-driven, never activates a window or creates a WebView;
+scrolling survives live refresh. Native control and injected-hover worker tests
+cover real HWND creation/destruction, debounce/click cancellation/reopen/quit,
+Unicode/read-only text and foreground preservation. Geometry and rate-reset
+tests pass. Original real Tauri encrypted-key/host/tunnel UI regression passes.
+Desktop automation could not reliably target the Shell tray, so mouse-driven
+Shell hover/menu clicks are not claimed as manually verified; native lifecycle
+and service/action behavior are covered by executable tests.
+Telemetry phase commit: `0862d020124e4d5f85d68c5d21c10ef097d722ad`.
+
+Full native shell gate passed: 31 unit + 12 real SSH integration tests,
+fmt/check/test/clippy, boundary/source-patch scans and frontend check/build.
+

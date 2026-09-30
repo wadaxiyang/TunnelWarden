@@ -42,3 +42,15 @@ The explicitly requested v0.2 scope retains every v0.1 acceptance item and adds:
 | Remote policy | Original refusal error retained; external bind guidance; no public-access claim from Running |
 | Disposable UI | Zero WebView2 processes after close; live tunnel transfers; reopen reflects runtime; dirty draft confirmation |
 | Headless startup | Login/background launch creates runtime/tray without WebView; installed package checked on CI |
+
+## v0.2.1 acceptance extension
+
+- Live bidirectional counters for Local/Remote/Dynamic, no SOCKS framing;
+  shared-connection isolation, explicit cancellation and reset on reattach.
+- Rate sampler uses real elapsed time; restart discards its previous baseline.
+- Native panel hover debounce/cancel/reopen/quit lifecycle; no focus steal;
+  read-only Unicode text, scrolling retained during updates, HWND destruction.
+- Negative monitor coordinates/top-taskbar placement stays in the work area.
+- Native per-tunnel menu labels/action availability follow authoritative states;
+  saved changes refresh entries; all actions reuse existing service paths.
+- Full existing SSH/UI regression and installed headless startup without WebView.

@@ -39,12 +39,24 @@ pub async fn delete_host(service: Service<'_>, host_id: Uuid) -> Result<(), Stri
     service.delete_host(host_id).await
 }
 #[tauri::command]
-pub async fn save_tunnel(service: Service<'_>, tunnel: TunnelDto) -> Result<TunnelDto, String> {
-    service.save_tunnel(tunnel).await
+pub async fn save_tunnel(
+    app: tauri::AppHandle,
+    service: Service<'_>,
+    tunnel: TunnelDto,
+) -> Result<TunnelDto, String> {
+    let result = service.save_tunnel(tunnel).await;
+    crate::tray::refresh(&app);
+    result
 }
 #[tauri::command]
-pub async fn delete_tunnel(service: Service<'_>, tunnel_id: Uuid) -> Result<(), String> {
-    service.delete_tunnel(tunnel_id).await
+pub async fn delete_tunnel(
+    app: tauri::AppHandle,
+    service: Service<'_>,
+    tunnel_id: Uuid,
+) -> Result<(), String> {
+    let result = service.delete_tunnel(tunnel_id).await;
+    crate::tray::refresh(&app);
+    result
 }
 #[tauri::command]
 pub async fn start_tunnel(service: Service<'_>, tunnel_id: Uuid) -> Result<(), String> {

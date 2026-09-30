@@ -64,3 +64,13 @@ Launch-at-login is headless. Opening/reopening the interface does not rerun
 runtime auto-start. New manual authentication questions can summon the UI;
 unattended retry remains strict and never prompts. Pending questions/tests
 are cancelled when the interface is destroyed; established tunnels continue.
+
+## v0.2.1 native tray presentation
+
+The hover panel is a Win32 tool window with a read-only native edit control,
+created after a 500 ms hover and destroyed on dismissal. It never creates a
+WebView or activates/focuses itself. One shell worker waits without polling
+when no hover/panel exists; while visible it samples payload counters once per
+second. Rates use elapsed monotonic time and reset their baseline on reattach.
+Native menu entries retain handles across status updates; configuration changes
+rebuild only the Tunnels children. Every action calls the existing AppService.

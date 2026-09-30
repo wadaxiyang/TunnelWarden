@@ -107,3 +107,19 @@ explains server forwarding/bind policies and external reachability remains
 explicitly unverified. Closing the UI releases its WebView; an unsaved editor,
 settings draft or pending question requests confirmation. Backend runtime and
 tray survive, and a recreated UI always reloads the authoritative state.
+
+## v0.2.1 tray UI
+
+Hover the icon for a text-only native status panel: running/saved count, each
+saved tunnel's name/state, running upload/download payload rates and a short
+error excerpt. The full list scrolls; updates preserve scroll position. Move
+outside the icon/panel to dismiss (350 ms grace allows entering the panel).
+Clicking the icon dismisses it; native menus suppress it. Per-monitor work-area
+placement and DPI-scaled Segoe UI keep it readable, with no WebView or focus
+steal. The icon retains its accessible tooltip name when not hovered.
+
+Right click → Tunnels → tunnel name/status → Start or Stop. Connecting and
+Retrying offer Stop; Stopped/Error offer Start. Start-all/Stop-all/Open/Quit
+remain. Manual authentication questions can still open the main interface.
+Rates mean payload toward/from SSH, exclude protocol overhead and do not
+indicate public reachability. New/reopened panels take one second to sample.
