@@ -3289,7 +3289,6 @@ dependencies = [
 [[package]]
 name = "oryxis-ssh"
 version = "0.1.0"
-source = "git+https://github.com/wilsonglasser/oryxis.git?rev=16ad2af83b424780ff60b6420a6c20a3b30c7143#16ad2af83b424780ff60b6420a6c20a3b30c7143"
 dependencies = [
  "base64 0.23.1",
  "dirs 6.0.0",

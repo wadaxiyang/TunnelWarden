@@ -115,3 +115,13 @@ engine accepts decrypted PEM via KeyMaterial). No new key decryption is added.
   error context preserves the returned engine message and adds policy hints.
 
 This supersedes section G's v0.1 encrypted-key/agent-only limitation.
+
+## I. v0.2.1 passive traffic instrumentation (2026-09-30)
+
+The pinned core/ssh/app have no per-forward byte telemetry. Vendor the complete
+`crates/oryxis-ssh` at the same pin under `vendor/oryxis-ssh`; Cargo's patch table
+selects it while core/vault remain git dependencies. Exact modifications and
+license are recorded in its PROVENANCE.md and upstream/oryxis-ssh-traffic.patch.
+Only pass-through write counters and their plumbing are added; the original
+channel bridging, cancellation and accept loops stay intact. The runtime adds
+an on-demand native telemetry query, with no persisted state or extra tick.

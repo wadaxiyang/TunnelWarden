@@ -11,6 +11,8 @@ try {
     cargo clippy --workspace --all-targets -- -D warnings
     if ($LASTEXITCODE) { throw 'cargo clippy failed' }
     & ./scripts/verify-boundaries.ps1
+    python scripts/verify-vendor.py
+    if ($LASTEXITCODE) { throw 'Oryxis source/patch verification failed' }
     if ($Frontend) {
         $npm = if (Get-Command npm -ErrorAction SilentlyContinue) { 'npm' } else { './.upstream/tooling/node_modules/.bin/npm.cmd' }
         & $npm run check

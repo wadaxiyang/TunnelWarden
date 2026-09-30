@@ -137,6 +137,76 @@ async fn public_api_all_modes_share_a_connection_and_explicitly_cancel() {
 }
 
 #[tokio::test]
+async fn payload_counters_are_live_isolated_and_reset_for_all_modes() {
+    let fixture = Fixture::start();
+    let c = fixture.connection();
+    let conn = fixture
+        .engine()
+        .connect_forward_conn(&c, Some(PASSWORD), None, None)
+        .await
+        .unwrap();
+    let echo = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let target = echo.local_addr().unwrap().port();
+    let echo_task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = echo.accept().await.unwrap();
+            tokio::spawn(async move {
+                let (mut read, mut write) = stream.split();
+                let _ = tokio::io::copy(&mut read, &mut write).await;
+            });
+        }
+    });
+    let idle_rule = rule(&c, ForwardKind::Local).await;
+    let idle = conn.attach(&idle_rule).await.unwrap();
+    for kind in ForwardKind::ALL {
+        let mut r = rule(&c, kind).await;
+        r.target_port = target;
+        let session = conn.attach(&r).await.unwrap();
+        let mut stream = TcpStream::connect(("127.0.0.1", r.listen_port))
+            .await
+            .unwrap();
+        if kind == ForwardKind::Dynamic {
+            stream.write_all(&[5, 1, 0]).await.unwrap();
+            let mut method = [0; 2];
+            stream.read_exact(&mut method).await.unwrap();
+            let [hi, lo] = target.to_be_bytes();
+            stream
+                .write_all(&[5, 1, 0, 1, 127, 0, 0, 1, hi, lo])
+                .await
+                .unwrap();
+            let mut reply = [0; 10];
+            stream.read_exact(&mut reply).await.unwrap();
+            assert_eq!(reply[1], 0);
+        }
+        // Keep the socket open: counters must update before EOF and exclude SOCKS framing.
+        let payload = vec![42u8; 128 * 1024];
+        stream.write_all(&payload).await.unwrap();
+        let mut received = vec![0; payload.len()];
+        tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut received))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(received, payload);
+        assert_eq!(
+            session.traffic_bytes(),
+            (payload.len() as u64, payload.len() as u64)
+        );
+        assert_eq!(idle.traffic_bytes(), (0, 0));
+        let started = session.traffic_started_at();
+        session.cancel().await;
+        assert_released(r.listen_port).await;
+        let again = conn.attach(&r).await.unwrap();
+        assert_eq!(again.traffic_bytes(), (0, 0));
+        assert!(again.traffic_started_at() > started);
+        again.cancel().await;
+    }
+    idle.cancel().await;
+    echo_task.abort();
+}
+
+#[tokio::test]
 async fn private_key_auth_uses_upstream_engine() {
     let fixture = Fixture::start();
     let mut c = fixture.connection();

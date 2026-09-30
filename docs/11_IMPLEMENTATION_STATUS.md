@@ -278,3 +278,19 @@ v0.2 phase ledger before tagging:
 - This post-publication documentation receipt changes no release code and
   skips redundant CI. The tag identifies the source tested by both successful
   workflows; all v0.2 requested development and publication work is complete.
+
+## v0.2.1 — native tray additions (2026-09-30)
+
+User-authorized scope: a text-only native hover panel showing tunnel states
+and transfer rates, per-rule Start/Stop submenus, and Windows v0.2.1 publication.
+Order: upstream review/telemetry → native shell → acceptance/release.
+Upstream review found no per-forward counters; exact pinned vendoring with
+passive writer instrumentation follows docs/01. Core validation is in progress.
+
+### v0.2.1 telemetry gate — passed
+
+26 unit + 12 real SSH integration tests pass. Live 128 KiB bidirectional
+payload counts are exact for Local/Remote/Dynamic, exclude SOCKS framing,
+remain isolated on a shared connection and reset on reattach. Rust fmt/check/
+test/clippy, boundary scan and full pinned-source/patch verification pass.
+

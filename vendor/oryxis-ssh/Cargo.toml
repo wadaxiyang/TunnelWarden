@@ -1,0 +1,83 @@
+[package]
+name = "oryxis-ssh"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/wilsonglasser/oryxis"
+
+[dependencies]
+oryxis-core = { git = "https://github.com/wilsonglasser/oryxis.git", rev = "16ad2af83b424780ff60b6420a6c20a3b30c7143" }
+russh = { version = "0.62.5", features = ["des"] }
+russh-sftp = "2.4"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+thiserror = "2"
+tokio-socks = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+# HTTP CONNECT Proxy-Authorization: Basic header
+base64 = "0.23"
+# Per-host terminal encoding: transcode PTY bytes <-> UTF-8 for non-UTF-8
+# charsets (Big5, Shift-JIS, CP437, ...). UTF-8 hosts skip it entirely.
+encoding_rs = "0.8"
+# The SFTP console's line editor and listing columns place the cursor by
+# DISPLAY width: a CJK filename advances two columns per character, and
+# counting characters drifts the alignment one column at a time. Already
+# in the lock as a transitive of the terminal stack, so this adds no
+# weight to the build.
+unicode-width = "0.2"
+# X11 forwarding: `dirs` locates `~/.Xauthority`, `getrandom` mints the
+# fake MIT-MAGIC-COOKIE-1 announced to the remote in place of the real one.
+dirs = "6"
+getrandom = "0.4"
+# `get -p` / `put -p` preserve modification times, and std has no way to
+# SET one. Already in the lock as a transitive, so this adds no weight.
+filetime = "0.2"
+# `lcd` canonicalizes the directory it lands in, and on Windows std's
+# answer is a `\\?\` verbatim path that `lpwd` would print and `lcd ..`
+# could not walk. Already in the lock as a transitive.
+dunce = "1"
+
+# Enumerate the named-pipe namespace to discover Pageant/KeePassXC's
+# per-launch agent pipe (windows_agent_pipe). Windows-only.
+[target.'cfg(windows)'.dependencies]
+# 0.61 is the newest windows-sys line and the one the rest of the tree
+# already resolves to; 0.59 here was a THIRD copy in the build for no
+# reason. (`windows-sys` numbers independently from `windows`, which is
+# at 0.62: they are different crates, not two views of one.)
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    # A command proxy runs inside a Job Object closed with the transport
+    # (`proxy_spawn::ProxyReaper`), so cancelling a dial ends `cmd.exe`
+    # AND the proxy it started.
+    "Win32_Security",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+# A command proxy runs in a process group of its own, signalled whole
+# when its transport drops (`proxy_spawn::ProxyReaper`), so a proxy that
+# forked a helper does not outlive a cancelled dial. Already in the lock
+# as a transitive.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+# Build in-process certificates for the cert-auth unit tests via
+# ssh_key's Builder (rand 0.10 = the rand_core russh/ssh_key pull).
+# Renamed because the crate has no plain `rand` dep any more.
+rand010 = { package = "rand", version = "0.10", features = ["thread_rng"] }
+# Spin up an ephemeral OpenSSH container per test for hermetic SFTP /
+# SSH integration coverage, no real credentials, no shared state, no
+# need for a running daemon on the dev machine.
+testcontainers = "0.28"
+# Real files on disk for the agent-presence fingerprint test (it asserts
+# on existence, so a fixture path has to actually exist).
+tempfile = "3"
+# Surfaces the engine's own tracing in the live X11 test, where the log
+# is the only evidence of which forwarding branch was taken.
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["full", "test-util"] }
+
+# Isolated dependency workspace: retain upstream tests without adding them to the app gates.
+[workspace]

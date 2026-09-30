@@ -118,3 +118,13 @@ pub struct LogFilter {
     pub tunnel_id: Option<Uuid>,
     pub level: Option<String>,
 }
+
+/// Native presentation telemetry only. A new attachment resets the counters;
+/// started_at lets a sampler discard a previous attachment's baseline.
+#[derive(Clone, Debug)]
+pub struct TunnelTraffic {
+    pub id: Uuid,
+    pub started_at: std::time::Instant,
+    pub sent_bytes: u64,
+    pub received_bytes: u64,
+}

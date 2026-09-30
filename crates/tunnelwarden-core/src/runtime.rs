@@ -7,7 +7,7 @@
 // Oryxis 16ad2af83b424780ff60b6420a6c20a3b30c7143.
 //! The Oryxis standalone registry, shared host connections and retry ladder.
 
-use crate::dto::{RuntimeSnapshot, RuntimeTunnel, TunnelStatus};
+use crate::dto::{RuntimeSnapshot, RuntimeTunnel, TunnelStatus, TunnelTraffic};
 use oryxis_core::models::port_forward_rule::PortForwardRule;
 use oryxis_ssh::{ForwardConn, ForwardSession};
 use std::{
@@ -33,6 +33,7 @@ pub trait ForwardDialer: Send + Sync + 'static {
 
 type Reply = oneshot::Sender<Result<(), String>>;
 enum Command {
+    Traffic(oneshot::Sender<Vec<TunnelTraffic>>),
     Start(Uuid, Reply),
     Stop(Uuid, Reply),
     Configure(Vec<PortForwardRule>, bool, Reply),
@@ -84,6 +85,14 @@ impl TunnelRuntimeManager {
         let (updates, snapshot) = watch::channel(state.snapshot());
         tokio::spawn(state.run(rx, updates));
         Self { tx, snapshot }
+    }
+    /// Sample active payload counters on demand; no extra background tick or IPC events.
+    pub async fn traffic(&self) -> Result<Vec<TunnelTraffic>, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(Command::Traffic(tx))
+            .map_err(|_| "Runtime closed".to_string())?;
+        rx.await.map_err(|_| "Runtime closed".to_string())
     }
     pub fn snapshot(&self) -> RuntimeSnapshot {
         self.snapshot.borrow().clone()
@@ -216,6 +225,13 @@ impl RuntimeState {
         loop {
             let task = tokio::select! {
                 cmd = rx.recv() => match cmd {
+                    Some(Command::Traffic(reply)) => {
+                        let _ = reply.send(self.active_forwards.iter().map(|(id, session)| {
+                            let (sent_bytes, received_bytes) = session.traffic_bytes();
+                            TunnelTraffic { id: *id, started_at: session.traffic_started_at(), sent_bytes, received_bytes }
+                        }).collect());
+                        continue;
+                    }
                     Some(Command::EnsureHostIdle(id, reply)) => {
                         let result = if self.forward_conns.contains_key(&id) { Err("SSH host still has a live or pending connection; stop its tunnels and wait for the connection to finish".into()) } else { Ok(()) };
                         let _ = reply.send(result); Task::none()
