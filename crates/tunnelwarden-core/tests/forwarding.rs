@@ -502,6 +502,7 @@ async fn tauri_facing_service_crud_start_stop_restart_and_config_reload() {
     assert!(service.save_tunnel(dto.clone()).await.is_err());
     dto.listen_port = r.listen_port;
     service.save_tunnel(dto).await.unwrap();
+    assert!(service.get_tunnel_traffic(r.id).await.unwrap().is_none());
     assert!(service.delete_host(h.id).await.is_err());
     service.start_tunnel(r.id).await.unwrap();
     assert_ne!(
@@ -509,9 +510,27 @@ async fn tauri_facing_service_crud_start_stop_restart_and_config_reload() {
         TunnelStatus::Running
     );
     wait_status(&service.runtime, r.id, TunnelStatus::Running).await;
+    let baseline = service.get_tunnel_traffic(r.id).await.unwrap().unwrap();
+    assert_eq!(baseline.received_bytes, "0");
+    let mut connection = TcpStream::connect(("127.0.0.1", r.listen_port))
+        .await
+        .unwrap();
+    banner(&mut connection).await;
+    let sample = service.get_tunnel_traffic(r.id).await.unwrap().unwrap();
+    assert_eq!(sample.attachment, baseline.attachment);
+    assert!(sample.sampled_ms > baseline.sampled_ms);
+    assert!(sample.elapsed_ms > baseline.elapsed_ms);
+    // Remote mode sends the local target's banner toward the SSH server.
+    assert!(sample.sent_bytes.parse::<u64>().unwrap() > 0);
+    let wire = serde_json::to_value(&sample).unwrap();
+    assert!(wire["received_bytes"].is_string());
     service.restart_tunnel(r.id).await.unwrap();
     wait_status(&service.runtime, r.id, TunnelStatus::Running).await;
+    let restarted = service.get_tunnel_traffic(r.id).await.unwrap().unwrap();
+    assert_ne!(restarted.attachment, baseline.attachment);
+    assert_eq!(restarted.received_bytes, "0");
     service.stop_tunnel(r.id).await.unwrap();
+    assert!(service.get_tunnel_traffic(r.id).await.unwrap().is_none());
     assert_released(r.listen_port).await;
     service.runtime.shutdown().await.unwrap();
     let saved = std::fs::read_to_string(&path).unwrap();
@@ -525,6 +544,13 @@ async fn tauri_facing_service_crud_start_stop_restart_and_config_reload() {
     restored.start_tunnel(r.id).await.unwrap();
     wait_status(&restored.runtime, r.id, TunnelStatus::Running).await;
     restored.delete_tunnel(r.id).await.unwrap();
+    assert!(
+        restored
+            .get_tunnel_traffic(r.id)
+            .await
+            .unwrap_err()
+            .contains("no longer exists")
+    );
     assert_released(r.listen_port).await;
     assert!(restored.list_tunnels().is_empty());
     restored.delete_host(h.id).await.unwrap();

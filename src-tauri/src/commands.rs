@@ -21,6 +21,13 @@ pub fn get_runtime_snapshot(service: Service<'_>) -> RuntimeSnapshot {
     service.get_runtime_snapshot()
 }
 #[tauri::command]
+pub async fn get_tunnel_traffic(
+    service: Service<'_>,
+    tunnel_id: Uuid,
+) -> Result<Option<TrafficSample>, String> {
+    service.get_tunnel_traffic(tunnel_id).await
+}
+#[tauri::command]
 pub fn get_logs(service: Service<'_>, filter: Option<LogFilter>) -> Vec<LogEntry> {
     service.get_logs(filter)
 }

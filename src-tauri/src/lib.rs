@@ -139,6 +139,7 @@ pub fn run() {
             commands::list_hosts,
             commands::list_tunnels,
             commands::get_runtime_snapshot,
+            commands::get_tunnel_traffic,
             commands::get_logs,
             commands::get_settings,
             commands::save_host,

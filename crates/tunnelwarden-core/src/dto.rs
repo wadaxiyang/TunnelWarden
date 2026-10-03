@@ -128,3 +128,15 @@ pub struct TunnelTraffic {
     pub sent_bytes: u64,
     pub received_bytes: u64,
 }
+
+/// Demand-driven UI sample of an active attachment, not persisted configuration.
+/// Decimal strings preserve the full byte counts and opaque attachment identity
+/// across JavaScript's integer precision boundary. Times use a monotonic clock.
+#[derive(Clone, Debug, Serialize)]
+pub struct TrafficSample {
+    pub attachment: String,
+    pub sampled_ms: f64,
+    pub elapsed_ms: f64,
+    pub sent_bytes: String,
+    pub received_bytes: String,
+}

@@ -29,9 +29,11 @@ pub struct AppService {
     dialer: Arc<ApplicationDialer>,
     host_tests: std::sync::Mutex<HashMap<Uuid, Uuid>>,
     mutations: Mutex<()>,
+    telemetry_origin: std::time::Instant,
 }
 impl AppService {
     pub fn new(store: Arc<ConfigStore>, secrets: Arc<dyn SecretStore>) -> Arc<Self> {
+        let telemetry_origin = std::time::Instant::now();
         let config = store.snapshot();
         let prompts = Arc::new(PromptBroker::new(store.clone()));
         let dialer = Arc::new(ApplicationDialer {
@@ -91,6 +93,7 @@ impl AppService {
             dialer,
             host_tests: std::sync::Mutex::new(HashMap::new()),
             mutations: Mutex::new(()),
+            telemetry_origin,
         })
     }
     pub fn list_hosts(&self) -> Result<Vec<HostDto>, String> {
@@ -122,6 +125,31 @@ impl AppService {
             .iter()
             .map(tunnel_dto)
             .collect()
+    }
+
+    /// Oryxis at 16ad2af has no forwarding history API (reviewed 2026-10-03).
+    /// Reuse the v0.2.1 passive counters; only DTO conversion is added here.
+    /// No sampler, subscription, network probe or runtime handle survives this call.
+    pub async fn get_tunnel_traffic(&self, id: Uuid) -> Result<Option<TrafficSample>, String> {
+        if !self.store.snapshot().tunnels.iter().any(|r| r.id == id) {
+            return Err("Tunnel no longer exists".into());
+        }
+        let traffic = self.runtime.traffic().await?;
+        let now = std::time::Instant::now();
+        Ok(traffic
+            .into_iter()
+            .find(|t| t.id == id)
+            .map(|t| TrafficSample {
+                attachment: t
+                    .started_at
+                    .duration_since(self.telemetry_origin)
+                    .as_nanos()
+                    .to_string(),
+                sampled_ms: now.duration_since(self.telemetry_origin).as_secs_f64() * 1000.0,
+                elapsed_ms: now.duration_since(t.started_at).as_secs_f64() * 1000.0,
+                sent_bytes: t.sent_bytes.to_string(),
+                received_bytes: t.received_bytes.to_string(),
+            }))
     }
     pub fn get_settings(&self) -> Settings {
         self.store.snapshot().settings

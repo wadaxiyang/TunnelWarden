@@ -357,3 +357,22 @@ short-list height were hardened and retested. Ready for v0.2.1 tag workflows.
   native rendering, lifecycle, geometry and service paths have executable coverage.
 - This documentation-only receipt changes no release code and skips redundant
   CI. The tag stays on the exact source built by the successful workflows.
+
+## v0.2.2 — tunnel detail page (2026-10-03)
+
+User-authorized scope: clickable tunnel details, real traffic rates/trends,
+configuration and recent state changes, then Windows v0.2.2 publication.
+Searched pinned core port_forward_rule, ssh engine/forwarding and app
+standalone dispatch/views: no per-forward traffic/history API exists upstream.
+Reuse the v0.2.1 counters unchanged and the existing bounded/redacted LogBook.
+The new service query only serializes an active attachment's byte counts,
+monotonic sample time/age and opaque attachment token; no engine handles,
+new runtime ticks, persistence or changes to the reviewed vendor patch.
+GUI samples only while the detail page is visible; no background chart work.
+
+### v0.2.2 telemetry/API gate — passed
+
+31 unit + 12 real SSH tests passed, including service-level active/inactive/
+deleted telemetry, live remote payload, monotonic timestamps, serialization and
+attachment-token/counter reset after restart. fmt/check/test/clippy, boundary
+scan and exact 46-file vendored-source verification all passed.

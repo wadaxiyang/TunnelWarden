@@ -70,3 +70,13 @@ is accepted only by save_host, stored by the OS, and never returned by queries.
   `tunnelwarden://key-passphrase` emits questions only, never the response/secret.
 - `export_error_logs() -> string | null`: native Save As; returns the saved path
   or null on cancellation. No arbitrary frontend-supplied file path is accepted.
+
+## v0.2.2 detail telemetry
+
+`get_tunnel_traffic(tunnel_id) -> TrafficSample | null` returns null for an
+inactive saved rule; a deleted/unknown rule returns an error. It reuses the
+runtime's passive counters. Decimal byte strings preserve u64 precision;
+`attachment` is an opaque token which changes on reattach. `sampled_ms` and
+`elapsed_ms` use monotonic time, not wall-clock time. No query starts a tunnel.
+UI history uses the existing per-tunnel filtered logs/events. Poll only while
+viewing visible details; discard rate baselines on pause, gaps or reattach.
