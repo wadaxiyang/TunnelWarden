@@ -126,3 +126,13 @@ User-requested tab refinement: Overview/Traffic/History, fixed header/navigation
 keyboard arrows/Home/End, no outer detail scrolling at 1080x720 or 760x520.
 Traffic also fits its panel at 760x520; sample data uses a modal and activity
 uses 10-entry pages. Updated real ui-v022 suite passes; screenshots reviewed.
+
+
+### v0.2.2 published build
+
+Tag/source: v0.2.2 / `9fcde989fd326a2f4515799393c0d11ff81b15f2`. CI 37096242851 and Windows Release 37096244703
+both succeeded: 31 Rust unit + 12 real SSH + 3 frontend tests and full gates.
+NSIS installation/resources/headless-start/uninstall checks passed. All eight
+downloaded assets match GitHub digests and all seven checksum entries; source
+ZIP identifies the exact tag and includes the tabbed details and Oryxis patch.
+Publication time: 2026-10-03T04:46:37Z.

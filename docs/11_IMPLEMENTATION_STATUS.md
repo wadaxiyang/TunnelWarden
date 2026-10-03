@@ -1,7 +1,6 @@
 # Implementation status
 
-Current candidate: **TunnelWarden 0.2.2**, Windows x64; final release checks in progress.
-Previous release: v0.2.1, published and verified.
+Current release: **TunnelWarden 0.2.2 — published and verified**, Windows x64.
 Development branch: `master`. The v0.1 phase history is retained below;
 the v0.2 implementation and publication receipts follow it.
 
@@ -418,3 +417,35 @@ zero vulnerabilities. Prior API and GUI phase CI runs both succeeded.
 API phase: `2bd6d2d6c31fc4b7501dafb4026e1d42de807980`.
 GUI phase: `395f7ecf5048dbd189fb1a559494094401e429da`.
 Publication receipt will follow actual tag workflow and downloaded-asset audit.
+
+
+### v0.2.2 publication receipt — complete
+
+- Release: https://github.com/wadaxiyang/TunnelWarden/releases/tag/v0.2.2
+- Published: 2026-10-03T04:46:37Z; non-draft, non-prerelease, eight assets.
+- Release/tag source: `9fcde989fd326a2f4515799393c0d11ff81b15f2`.
+- Telemetry/API phase: `2bd6d2d6c31fc4b7501dafb4026e1d42de807980`.
+- GUI phase: `395f7ecf5048dbd189fb1a559494094401e429da`.
+- Fixed top tabs / final acceptance / version: `9fcde989fd326a2f4515799393c0d11ff81b15f2`.
+- CI: https://github.com/wadaxiyang/TunnelWarden/actions/runs/37096242851 — success.
+- Windows Release: https://github.com/wadaxiyang/TunnelWarden/actions/runs/37096244703 — success.
+- Both workflows passed 31 Rust unit + 12 real SSH integration + 3 frontend
+  telemetry tests, full Rust/frontend gates and boundary/upstream patch checks.
+- Release built NSIS/MSI and passed installation/resources, installed headless
+  startup without WebView2 and uninstall before publication.
+- NSIS `TunnelWarden_0.2.2_x64-setup.exe`: 5,694,152 bytes.
+- MSI `TunnelWarden_0.2.2_x64_en-US.msi`: 8,409,088 bytes.
+- Other assets: source ZIP, LICENSE, NOTICE.ORYXIS, THIRD_PARTY_NOTICES.md,
+  THIRD_PARTY_LICENSES.txt and SHA256SUMS.txt.
+- All eight downloaded assets match GitHub SHA-256 digests; all seven checksum
+  entries match downloaded content. Installer format headers checked. Source
+  ZIP comment matches the tag and contains detail code/tests and the complete
+  vendor provenance/patch, without temporary .upstream fixtures.
+- Upstream remains `16ad2af83b424780ff60b6420a6c20a3b30c7143`.
+- Limits: unsigned Windows x64 packages. Chart measurements start while details
+  are visible, retain at most five minutes and clear when leaving details.
+  Activity comes from the current process's bounded 1,000-entry LogBook;
+  process exit clears it. Reconnection resets traffic totals. Remote/public
+  reachability depends on server/network policy. Encrypted file authentication
+  after process restart requires manual unlock or an external agent.
+- This documentation-only receipt leaves the release tag/source unchanged.
