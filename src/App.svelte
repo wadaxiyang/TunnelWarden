@@ -4,12 +4,14 @@
   import { listen, type UnlistenFn } from '@tauri-apps/api/event';
   import HostEditor from './components/HostEditor.svelte';
   import TunnelEditor from './components/TunnelEditor.svelte';
+  import TunnelDetails from './components/TunnelDetails.svelte';
   import Modal from './components/Modal.svelte';
   import KeyUnlock from './components/KeyUnlock.svelte';
   import { endpoint, errorText, type Host, type HostInput, type Tunnel, type Snapshot, type Settings, type LogEntry, type HostKeyPrompt, type KeyPassphrasePrompt, type HostTestResult } from './types';
   import license from '../LICENSE?raw';
   import notice from '../NOTICE.ORYXIS?raw';
   const pages = ['Tunnels', 'SSH Hosts', 'Logs', 'Settings', 'About'] as const;
+  let detailId = $state<string | null>(null);
   let page = $state<(typeof pages)[number]>('Tunnels');
   let hosts = $state<Host[]>([]); let tunnels = $state<Tunnel[]>([]);
   let runtime = $state<Snapshot>({ tunnels: [] }); let logs = $state<LogEntry[]>([]);
@@ -25,6 +27,7 @@
   let deletion = $state<{ kind: 'host' | 'tunnel'; id: string; name: string } | null>(null);
   let search = $state(''); let logLevel = $state('all'); let settingsSaved = $state(false);
   const native = isTauri();
+  let selectedTunnel = $derived(tunnels.find(t => t.id === detailId));
   let statusById = $derived(new Map(runtime.tunnels.map(r => [r.id, r])));
   let running = $derived(runtime.tunnels.filter(r => r.status === 'running').length);
   let visibleTunnels = $derived(tunnels.filter(t => `${t.name} ${hosts.find(h => h.id === t.host_id)?.name ?? ''} ${t.target_host}`.toLowerCase().includes(search.toLowerCase())));
@@ -103,16 +106,18 @@
 <div class="shell">
   <aside>
     <div class="brand"><span class="brand-mark" aria-hidden="true">↔</span><span>TunnelWarden<small>SSH tunnel manager</small></span></div>
-    <nav aria-label="Main navigation">{#each pages as item}<button aria-label={item} class:active={page === item} aria-current={page === item ? 'page' : undefined} onclick={() => { page = item; error = ''; }}>{item}{#if item === 'Tunnels' && tunnels.length}<span class="count">{tunnels.length}</span>{/if}</button>{/each}</nav>
+    <nav aria-label="Main navigation">{#each pages as item}<button aria-label={item} class:active={page === item} aria-current={page === item ? 'page' : undefined} onclick={() => { page = item; detailId = null; error = ''; }}>{item}{#if item === 'Tunnels' && tunnels.length}<span class="count">{tunnels.length}</span>{/if}</button>{/each}</nav>
     <div class="sidebar-bottom"><span class="status-dot" class:live={running > 0}></span>{running} running<small>v0.2.1</small></div>
   </aside>
   <main>
-    <header class="page-header"><div><h1>{page}</h1><p>{page === 'Tunnels' ? 'Your connections, kept within reach.' : page === 'SSH Hosts' ? 'Connection details and credentials for your tunnels.' : page === 'Logs' ? 'Recent activity from this session.' : page === 'Settings' ? 'Startup and connection behavior.' : 'A focused utility, powered by Oryxis.'}</p></div>
+    {#if !selectedTunnel || page !== 'Tunnels'}<header class="page-header"><div><h1>{page}</h1><p>{page === 'Tunnels' ? 'Your connections, kept within reach.' : page === 'SSH Hosts' ? 'Connection details and credentials for your tunnels.' : page === 'Logs' ? 'Recent activity from this session.' : page === 'Settings' ? 'Startup and connection behavior.' : 'A focused utility, powered by Oryxis.'}</p></div>
       {#if page === 'Tunnels'}<button class="primary" disabled={!native || loading || !hosts.length} onclick={() => { editingTunnel = null; tunnelEditor = true; }}>+ New tunnel</button>{:else if page === 'SSH Hosts'}<button class="primary" disabled={!native || loading} onclick={() => { editingHost = null; hostEditor = true; }}>+ New host</button>{/if}
-    </header>
+    </header>{/if}
     {#if !native}<div class="notice">Desktop connection unavailable. Open TunnelWarden to configure and run SSH tunnels.</div>{/if}
     {#if error && !deletion && !questions.length}<div class="error-banner" role="alert"><span>{error}</span><button class="icon-button" onclick={() => error = ''} aria-label="Dismiss error">×</button></div>{/if}
     {#if loading}<div class="empty"><strong>Loading configuration…</strong></div>
+    {:else if page === 'Tunnels' && selectedTunnel}
+      {#key selectedTunnel.id}<TunnelDetails tunnel={selectedTunnel} {hosts} runtimeState={statusById.get(selectedTunnel.id)} {logs} busy={busy === selectedTunnel.id} onback={() => { const id = detailId; detailId = null; requestAnimationFrame(() => document.getElementById(`detail-${id}`)?.focus()); }} onedit={() => { editingTunnel = selectedTunnel ?? null; tunnelEditor = true; }} onaction={command => selectedTunnel && void action(selectedTunnel.id, command)} />{/key}
     {:else if page === 'Tunnels'}
       {#if tunnels.length}<div class="toolbar"><label class="search">Search tunnels<input bind:value={search} placeholder="Name, SSH host or target" /></label><span class="muted">{running} running · {tunnels.length} saved</span></div>{/if}
       {#if !tunnels.length}<div class="empty"><span class="empty-symbol" aria-hidden="true">↔</span><h2>Your first tunnel starts here</h2><p>{hosts.length ? 'Connect a local app to a remote service, expose a local service, or open a SOCKS proxy.' : 'Add an SSH host, then choose where your tunnel listens and where it leads.'}</p>{#if !hosts.length}<button class="primary" disabled={!native} onclick={() => { page = 'SSH Hosts'; editingHost = null; hostEditor = true; }}>Add SSH host</button>{/if}</div>
@@ -120,7 +125,7 @@
       {:else}<div class="tunnel-list">{#each visibleTunnels as t (t.id)}
         {@const host = hosts.find(h => h.id === t.host_id)}{@const state = statusById.get(t.id)}{@const status = state?.status ?? 'stopped'}
         <article class="tunnel-row" aria-label={t.name}>
-          <div class="row-heading"><div class="inline"><span class="mode-badge">{t.kind[0]}</span><h2>{t.name}</h2>{#if t.auto_start}<span class="subtle-tag">Auto-start</span>{/if}</div><span class="status {status}"><span class="status-dot"></span>{status}</span></div>
+          <div class="row-heading"><div class="inline"><span class="mode-badge">{t.kind[0]}</span><h2><button id={`detail-${t.id}`} class="tunnel-title" aria-label={`View details for ${t.name}`} onclick={() => detailId = t.id}>{t.name}<span aria-hidden="true"> ↗</span></button></h2>{#if t.auto_start}<span class="subtle-tag">Auto-start</span>{/if}</div><span class="status {status}"><span class="status-dot"></span>{status}</span></div>
           <div class="route" class:dynamic={t.kind === 'Dynamic'}>
             <div><small>{t.kind === 'Remote' ? 'Remote listener' : t.kind === 'Dynamic' ? 'Local SOCKS5 listener' : 'Local listener'}</small><code>{endpoint(t.listen_address, t.listen_port)}</code></div>
             <span class="route-arrow" aria-hidden="true">{t.kind === 'Remote' ? '←' : '→'}</span>

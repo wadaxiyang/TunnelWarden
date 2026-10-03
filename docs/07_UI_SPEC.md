@@ -123,3 +123,20 @@ Retrying offer Stop; Stopped/Error offer Start. Start-all/Stop-all/Open/Quit
 remain. Manual authentication questions can still open the main interface.
 Rates mean payload toward/from SSH, exclude protocol overhead and do not
 indicate public reachability. New/reopened panels take one second to sample.
+
+## v0.2.2 detail presentation
+
+Click a tunnel card/title to open its detail page. Keyboard activation and
+Back restore focus. Start/Stop/Restart/Edit continue through the same actions.
+Show exact payload rates, per-attachment totals/age, mode-specific endpoints,
+configured jump route, auto-start, retry time and the original last error.
+The SVG chart offers 60/300-second windows, separate upload/download strokes,
+accessible description and a table of the last 20 exact samples. Up to 301
+points/5 minutes are retained only in the mounted visible detail page; leaving
+or destroying it stops polling. Minimized/hidden pages pause. Missing samples,
+clock gaps, counter resets and reattachment break lines rather than invent
+zero traffic or spikes. No samples before opening the page are implied.
+History filters the existing process-scoped 1,000-entry LogBook by tunnel,
+with an errors-only filter and 50-entry pagination. It survives UI destruction
+but not process exit. No runtime data is persisted. Remote details always
+state that external reachability is unverified.

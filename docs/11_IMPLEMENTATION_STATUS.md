@@ -376,3 +376,22 @@ GUI samples only while the detail page is visible; no background chart work.
 deleted telemetry, live remote payload, monotonic timestamps, serialization and
 attachment-token/counter reset after restart. fmt/check/test/clippy, boundary
 scan and exact 46-file vendored-source verification all passed.
+
+### v0.2.2 GUI acceptance
+
+Telemetry/API commit: `2bd6d2d` (full SHA in Git). Detail page uses on-demand
+real counters with no new chart dependency. 3 frontend regression tests cover
+precision, actual elapsed rates, baseline resets, missing data and retention.
+Real Tauri ui-smoke, ui-v02 and ui-v022 passed: 3,276,800 bytes each direction
+match exact service counters, live SVG paths, reset on restart, bind conflict,
+state history, keyboard focus restoration and polling disposal after navigation.
+Screenshots inspected at normal and 760px widths; no horizontal overflow.
+Axe reports zero violations; SVG text contrast requires manual inspection.
+While viewing details, close_ui destroys all test WebViews (count 0), same Rust
+PID stays alive and a real SSH banner still traverses the tunnel. Reopening
+restores the actual runtime and the existing in-memory authentication cache.
+Final combined gates are being run before the GUI phase commit.
+
+GUI phase gate passed: full fmt/check/test/clippy, 31 unit + 12 real SSH tests,
+3 frontend tests, zero Svelte diagnostics, production build and boundary/vendor
+checks. No new frontend package dependency was introduced.

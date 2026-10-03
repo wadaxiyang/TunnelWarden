@@ -54,3 +54,14 @@ The explicitly requested v0.2 scope retains every v0.1 acceptance item and adds:
 - Native per-tunnel menu labels/action availability follow authoritative states;
   saved changes refresh entries; all actions reuse existing service paths.
 - Full existing SSH/UI regression and installed headless startup without WebView.
+
+## v0.2.2 acceptance extension
+
+- Real per-tunnel detail IPC: inactive null, unknown/deleted error, live counters,
+  exact decimal serialization, monotonic age/sample time, reattach identity reset.
+- Rates subtract exact integer counters before display conversion; actual elapsed
+  time, gap/reattach/reset handling and bounded history have frontend regressions.
+- Real Tauri detail navigation/focus, byte transfer/chart, stop/restart, bind error
+  and per-tunnel activity. Leaving details/navigation stops telemetry requests.
+- Existing host/key/CRUD regressions, minimum window layout, SVG/table accessibility,
+  and detail-window destruction with no WebView while SSH remains alive.

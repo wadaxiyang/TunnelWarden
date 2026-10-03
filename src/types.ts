@@ -10,5 +10,6 @@ export interface LogEntry { id: string; timestamp: string; level: string; tunnel
 export interface HostKeyPrompt { id: string; host_id: string; hostname: string; port: number; key_type: string; fingerprint: string; old_fingerprint: string | null }
 export interface KeyPassphrasePrompt { id: string; host_id: string; host_name: string; identity_file: string; error: string | null }
 export interface HostTestResult { elapsed_ms: number; message: string }
+export interface TrafficSample { attachment: string; sampled_ms: number; elapsed_ms: number; sent_bytes: string; received_bytes: string }
 export const endpoint = (host: string, port: number) => `${host.includes(':') ? `[${host}]` : host}:${port}`;
 export const errorText = (e: unknown) => e instanceof Error ? e.message : String(e);
