@@ -137,6 +137,18 @@ or destroying it stops polling. Minimized/hidden pages pause. Missing samples,
 clock gaps, counter resets and reattachment break lines rather than invent
 zero traffic or spikes. No samples before opening the page are implied.
 History filters the existing process-scoped 1,000-entry LogBook by tunnel,
-with an errors-only filter and 50-entry pagination. It survives UI destruction
+with an errors-only filter and 10-entry pages. It survives UI destruction
 but not process exit. No runtime data is persisted. Remote details always
 state that external reachability is unverified.
+
+### Detail tabs (user refinement, 2026-10-03)
+
+Overview / Traffic / History are top-level tabs within the tunnel detail page.
+The back link, name, current status, action buttons and tab bar stay fixed.
+Overview contains configuration and full error/server-policy information;
+Traffic contains rates and the chart; History contains filtered activity pages.
+Exact traffic samples open in a dialog rather than expanding the page vertically.
+The outer detail page fits the window; a tab's own content area can scroll for
+long records/small windows without moving navigation. ArrowLeft/ArrowRight,
+Home/End and normal Tab support keyboard navigation with proper tab semantics.
+Switching tabs preserves the bounded traffic series; leaving details clears it.

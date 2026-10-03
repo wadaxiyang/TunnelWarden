@@ -107,9 +107,9 @@
   <aside>
     <div class="brand"><span class="brand-mark" aria-hidden="true">↔</span><span>TunnelWarden<small>SSH tunnel manager</small></span></div>
     <nav aria-label="Main navigation">{#each pages as item}<button aria-label={item} class:active={page === item} aria-current={page === item ? 'page' : undefined} onclick={() => { page = item; detailId = null; error = ''; }}>{item}{#if item === 'Tunnels' && tunnels.length}<span class="count">{tunnels.length}</span>{/if}</button>{/each}</nav>
-    <div class="sidebar-bottom"><span class="status-dot" class:live={running > 0}></span>{running} running<small>v0.2.1</small></div>
+    <div class="sidebar-bottom"><span class="status-dot" class:live={running > 0}></span>{running} running<small>v0.2.2</small></div>
   </aside>
-  <main>
+  <main class:detail-main={page === 'Tunnels' && !!selectedTunnel}>
     {#if !selectedTunnel || page !== 'Tunnels'}<header class="page-header"><div><h1>{page}</h1><p>{page === 'Tunnels' ? 'Your connections, kept within reach.' : page === 'SSH Hosts' ? 'Connection details and credentials for your tunnels.' : page === 'Logs' ? 'Recent activity from this session.' : page === 'Settings' ? 'Startup and connection behavior.' : 'A focused utility, powered by Oryxis.'}</p></div>
       {#if page === 'Tunnels'}<button class="primary" disabled={!native || loading || !hosts.length} onclick={() => { editingTunnel = null; tunnelEditor = true; }}>+ New tunnel</button>{:else if page === 'SSH Hosts'}<button class="primary" disabled={!native || loading} onclick={() => { editingHost = null; hostEditor = true; }}>+ New host</button>{/if}
     </header>{/if}
@@ -157,7 +157,7 @@
         <footer><span class="success" role="status">{settingsSaved ? 'Settings saved' : ''}</span><button class="primary" disabled={!native || busy === 'settings'}>{busy === 'settings' ? 'Saving…' : 'Save settings'}</button></footer>
       </form>
     {:else}
-      <div class="about"><div class="about-title"><span class="brand-mark">↔</span><div><h2>TunnelWarden <span class="muted">0.2.1</span></h2><p>Persistent SSH tunnels. A small, dedicated desktop utility.</p></div></div><p>SSH transport, authentication, jump routes and forwarding are provided by Oryxis. The standalone forwarding runtime is adapted from its application.</p><dl><dt>Source & releases</dt><dd><a href="https://github.com/wadaxiyang/TunnelWarden" target="_blank" rel="noreferrer" onclick={e => { if (native) { e.preventDefault(); void invoke('open_source').catch(e => error = errorText(e)); } }}>github.com/wadaxiyang/TunnelWarden</a></dd><dt>Oryxis upstream</dt><dd><code class="fingerprint">16ad2af83b424780ff60b6420a6c20a3b30c7143</code></dd><dt>License</dt><dd>GNU AGPL-3.0-or-later</dd></dl><details><summary>Oryxis attribution</summary><pre>{notice}</pre></details><details><summary>GNU Affero General Public License</summary><pre>{license}</pre></details></div>
+      <div class="about"><div class="about-title"><span class="brand-mark">↔</span><div><h2>TunnelWarden <span class="muted">0.2.2</span></h2><p>Persistent SSH tunnels. A small, dedicated desktop utility.</p></div></div><p>SSH transport, authentication, jump routes and forwarding are provided by Oryxis. The standalone forwarding runtime is adapted from its application.</p><dl><dt>Source & releases</dt><dd><a href="https://github.com/wadaxiyang/TunnelWarden" target="_blank" rel="noreferrer" onclick={e => { if (native) { e.preventDefault(); void invoke('open_source').catch(e => error = errorText(e)); } }}>github.com/wadaxiyang/TunnelWarden</a></dd><dt>Oryxis upstream</dt><dd><code class="fingerprint">16ad2af83b424780ff60b6420a6c20a3b30c7143</code></dd><dt>License</dt><dd>GNU AGPL-3.0-or-later</dd></dl><details><summary>Oryxis attribution</summary><pre>{notice}</pre></details><details><summary>GNU Affero General Public License</summary><pre>{license}</pre></details></div>
     {/if}
   </main>
 </div>

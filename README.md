@@ -1,4 +1,4 @@
-# TunnelWarden 0.2.1
+# TunnelWarden 0.2.2
 
 ## Install and use
 
@@ -25,6 +25,16 @@ when absent. This release is unsigned.
    NAT/routing and target service, then connect from a separate external machine.
 4. Stop releases listeners, including remote binds. Edit stops the old rule
    before saving; Delete cancels before removing configuration.
+
+Click a tunnel card to open **Details**, with **Overview / Traffic / History**
+tabs and fixed navigation instead of one long scrolling page. View live upload/download rates, exact
+per-connection byte totals and age, configuration, current error/retry time,
+and a per-tunnel activity history with an errors-only filter. The lightweight
+chart offers 1-minute/5-minute views and an exact recent-samples dialog.
+It collects only while details are visible and clears when leaving the page;
+no traffic history is collected in the background. Reconnects and missing
+samples create gaps. Activity comes from the last 1,000 in-memory app log
+entries and survives closing the UI, but clears when the app process exits.
 
 Auto-start applies at each application launch. Auto-reconnect uses Oryxis'
 15/30/60/120-second backoff and a 15-second retry tick (an attempt can occur one
@@ -65,7 +75,7 @@ report before sharing.
   auto-start can authenticate. Use an external SSH agent for unattended unlock.
 - No certificate/interactive OTP UI, terminal, SFTP or built-in agent is included.
 - Remote listeners remain subject to SSH server forwarding/GatewayPorts policy.
-- Windows x64 is the only packaged and validated target for 0.2.1.
+- Windows x64 is the only packaged and validated target for 0.2.2.
 
 ## Build and validate
 

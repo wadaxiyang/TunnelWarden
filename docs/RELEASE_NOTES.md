@@ -1,31 +1,30 @@
-TunnelWarden 0.2.1 adds lightweight native tray controls.
+TunnelWarden 0.2.2 adds tunnel details and live traffic trends.
 
-- **Hover status panel**: running/saved count, each tunnel's status, upload and
-  download payload rates, and short error details. Native Win32 text controls,
-  no WebView, no focus stealing. Long lists scroll. The panel is created after
-  a 500 ms hover and destroyed after dismissal; rates refresh only while visible.
-- **Per-tunnel tray controls**: right click → Tunnels → name/status → Start or
-  Stop. Connecting/retrying rules can be stopped. Open, Start all, Stop all and
-  Quit remain available. All operations use the existing application runtime.
-- **Accurate per-rule counters**: independent Local/Remote/Dynamic payload counts,
-  including rules sharing one SSH connection. One-second sampled rates reset
-  their baseline on reconnect. Upload is this PC → SSH; download is SSH → this
-  PC. SSH/TCP/SOCKS overhead is excluded; successful writes do not prove delivery
-  to the final application or external/public reachability.
+- Click a tunnel card/name for **Overview / Traffic / History** tabs with fixed
+  navigation. Inspect its live status, error/retry details,
+  configuration, connection age and exact per-connection sent/received bytes.
+  Start, Stop, Restart and Edit are available directly from the detail page.
+- Upload/download line chart with 1-minute and 5-minute views, plus a table of
+  recent exact rates in a separate dialog. Measurements use real elapsed time and preserve integer
+  counter precision. Reconnects, pauses and missing samples appear as gaps.
+- Per-tunnel state/activity history, errors-only filter and older-entry paging.
+  History comes from the latest 1,000 application log entries in this process.
+- Lightweight on-demand sampling: only the visible detail page polls, once per
+  second. Leaving details clears chart history and stops polling. Closing the
+  UI releases WebView2 while the Rust runtime and tray keep tunnels alive.
 
-Windows x64 NSIS `x64-setup.exe` and MSI installers are attached, with matching
-source, license notices and SHA256SUMS.txt. Existing profiles remain compatible.
-Packages are unsigned; installers obtain Microsoft WebView2 when needed for the
-main configuration interface. Hovering and basic tray controls need no WebView.
+Windows x64 NSIS EXE and MSI installers are attached. Existing profiles remain
+compatible. Source, license notices and SHA256SUMS.txt accompany the binaries.
+Packages are unsigned. Main-window WebView2 is obtained by the installer when
+needed; the native tray controls still do not create a WebView.
 
-Oryxis remains at 16ad2af83b424780ff60b6420a6c20a3b30c7143. The complete SSH crate
-is vendored at that exact pin with passive writer accounting only. Its provenance
-and full checked diff are included in the source archive. Original transport,
-authentication, forwarding, cancellation and retry logic is retained.
-AGPL-3.0-or-later; all license and modification notices are included.
+Oryxis remains pinned to 16ad2af83b424780ff60b6420a6c20a3b30c7143.
+This release reuses the existing v0.2.1 passive payload counters unchanged.
+The reviewed vendor patch, provenance and AGPL-3.0-or-later notices are included.
 
-Known limits: Windows x64; unsigned packages. A newly opened panel needs one
-sampling interval before showing a measured rate. Manual encrypted-key unlock
-is still needed after full app restart, or use an external agent. Unknown/changed
-host keys require manual verification. Remote/public reachability depends on SSH
-server policies and the network. The app must stay running to maintain tunnels.
+Limits: chart history starts when details open, retains at most five minutes,
+and is not saved. Activity history clears on process exit. Byte totals reset
+on reconnect. Payload measurements exclude protocol overhead and cannot prove
+final delivery or public reachability. Remote accessibility depends on server
+policy and the network. Encrypted files need manual unlock after full app
+restart, or an external SSH agent for unattended operation.

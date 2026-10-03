@@ -101,3 +101,28 @@ Release installation/resources/headless-start/uninstall checks passed.
 All eight downloaded assets match GitHub digests and seven checksum entries;
 source ZIP identifies the exact tag and includes the reviewed Oryxis patch.
 Publication time: 2026-09-30T09:07:27Z.
+
+## v0.2.2 validation (2026-10-03)
+
+- Full local gates: 31 Rust unit + 12 real SSH integration + 3 frontend rate/
+  history tests, no ignored tests; fmt/check/test/clippy; Svelte zero errors/
+  warnings; production build; architecture and exact pinned vendor diff checks.
+- Existing real Tauri CRUD and v0.2 encrypted-key/host-test regressions pass.
+- `node tests/ui-v022.mjs` after ui-v02 exercises actual loopback echo traffic:
+  3,276,800 bytes in each direction, exact service counters, nonempty live
+  chart paths, connection reset, stopped state, real bind-conflict errors,
+  history retained across detail navigation, focus and no polling after leaving.
+- Inspected normal/minimum-width screenshots; no horizontal overflow. Axe has
+  zero violations; manual SVG text contrast review supplements its incomplete
+  automated SVG contrast assessment. Activity uses keyboard-accessible paging.
+- Closing from details removed all isolated WebView2 processes while the same
+  Rust PID and a real forwarding connection survived. Reopening restored state
+  and the authentication cache. Disposable profiles were cleaned after tests.
+- CI and release both run the new frontend regressions through scripts/check.
+  UI tests are manual executable acceptance scripts against real WebView/CDP,
+  not mocked browser tests; see the reproduction instructions above.
+
+User-requested tab refinement: Overview/Traffic/History, fixed header/navigation,
+keyboard arrows/Home/End, no outer detail scrolling at 1080x720 or 760x520.
+Traffic also fits its panel at 760x520; sample data uses a modal and activity
+uses 10-entry pages. Updated real ui-v022 suite passes; screenshots reviewed.

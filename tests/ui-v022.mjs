@@ -13,6 +13,7 @@ function run(...command) {
 const snapshot = () => run('snapshot', '-i');
 const click = name => { snapshot(); return run('find', 'role', 'button', 'click', '--name', name, '--exact'); };
 const body = () => run('get', 'text', 'body');
+const tab = name => { snapshot(); return run('find', 'role', 'tab', 'click', '--name', name, '--exact'); };
 const wait = ms => new Promise(r => setTimeout(r, ms));
 async function waitText(text) {
   const until = Date.now() + 15000;
@@ -32,10 +33,20 @@ try {
   evaluate(`(async()=>{const i=window.__TAURI_INTERNALS__.invoke; await i('save_tunnel',{tunnel:${JSON.stringify(adapted)}}); await i('start_tunnel',{tunnelId:${JSON.stringify(original.id)}}); return true;})()`);
   run('reload'); await waitText(saved.name);
   evaluate(`(()=>{const original=window.__TAURI_INTERNALS__.invoke; window.detailTestCalls=0; window.__TAURI_INTERNALS__.invoke=(cmd,...args)=>{if(cmd==='get_tunnel_traffic')window.detailTestCalls++;return original(cmd,...args)};return true;})()`);
-  click(`View details for ${saved.name}`); await waitText('Live traffic');
-  assert(body().includes('State & activity history'));
+  click(`View details for ${saved.name}`); await waitText('Configuration');
+  assert(!body().includes('Live traffic'));
+  assert(!body().includes('State & activity history'));
   assert(body().includes(`127.0.0.1:${echoPort}`));
   assert.equal(evaluate('document.activeElement.tagName'), 'H1');
+  tab('Overview'); run('press', 'ArrowRight');
+  assert.equal(evaluate('document.activeElement.getAttribute("aria-selected")'), 'true');
+  assert.equal(evaluate('document.activeElement.textContent.trim()'), 'Traffic');
+  await waitText('Live traffic');
+  assert(!body().includes('Configuration'));
+  assert.equal(evaluate('document.documentElement.scrollHeight > innerHeight'), false);
+  run('press', 'End'); assert(body().includes('State & activity history'));
+  run('press', 'Home'); assert(body().includes('Configuration'));
+  tab('Traffic');
   socket = createConnection({ host: '127.0.0.1', port: saved.port });
   await new Promise((resolve, reject) => { socket.once('connect', resolve); socket.once('error', reject); });
   let received = 0; socket.on('data', bytes => received += bytes.length);
@@ -50,6 +61,8 @@ try {
   assert(evaluate(`document.querySelector('[data-metric="upload"]').title`).includes('bytes/s'));
   assert.equal(evaluate('document.documentElement.scrollWidth > window.innerWidth'), false);
   run('screenshot', '--full', '--screenshot-dir', resolve('.upstream/ui-v022-evidence'));
+  click('View exact samples'); await waitText('Recent traffic samples');
+  click('Close samples');
   click('Restart'); await waitText('Taking first sample');
   await wait(1300);
   const restarted = evaluate(`(async()=>await window.__TAURI_INTERNALS__.invoke('get_tunnel_traffic',{tunnelId:${JSON.stringify(original.id)}}))()`);
@@ -59,20 +72,20 @@ try {
   assert(body().includes('Stopped'));
   // Real bind conflict must show an authoritative error and history, not Running.
   const occupied = createServer(); await new Promise(r => occupied.listen(saved.port, '127.0.0.1', r));
-  try { click('Start'); await waitText('error'); assert(evaluate("document.querySelector('.error-banner')?.textContent.length > 0")); }
+  try { click('Start'); await waitText('Error'); tab('Overview'); assert(evaluate("document.querySelector('.error-banner')?.textContent.length > 0")); }
   finally { await new Promise(r => occupied.close(r)); }
   click('← All tunnels');
   assert.equal(evaluate('document.activeElement.getAttribute("aria-label")'), `View details for ${saved.name}`);
   await wait(300); const calls = evaluate('window.detailTestCalls'); await wait(2200);
   assert.equal(evaluate('window.detailTestCalls'), calls, 'Leaving details must stop polling');
-  click(`View details for ${saved.name}`); await waitText('State & activity history');
+  click(`View details for ${saved.name}`); tab('History'); await waitText('State & activity history');
   assert(body().includes('Running')); assert(body().includes('Stopped'));
   click('SSH Hosts'); await wait(300); const left = evaluate('window.detailTestCalls'); await wait(1300);
   assert.equal(evaluate('window.detailTestCalls'), left, 'Changing navigation must stop polling');
   evaluate(`(async()=>{const i=window.__TAURI_INTERNALS__.invoke; await i('save_tunnel',{tunnel:${JSON.stringify(original)}}); await i('start_tunnel',{tunnelId:${JSON.stringify(original.id)}});return true;})()`);
   run('reload'); await waitText(saved.name);
   assert(!run('errors').trim());
-  console.log('PASS: real detail navigation/focus, bidirectional exact counters and charts, restart/reset, stop, bind-error history, retained activity, polling cleanup.');
+  console.log('PASS: real detail tabs/arrows/Home/End/focus, no outer page scroll, bidirectional exact counters and charts, restart/reset, stop, bind-error history, retained activity, polling cleanup.');
 } finally {
   socket?.destroy(); echo.close();
 }

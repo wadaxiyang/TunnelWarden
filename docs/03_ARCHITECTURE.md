@@ -74,3 +74,11 @@ when no hover/panel exists; while visible it samples payload counters once per
 second. Rates use elapsed monotonic time and reset their baseline on reattach.
 Native menu entries retain handles across status updates; configuration changes
 rebuild only the Tunnels children. Every action calls the existing AppService.
+
+## v0.2.2 detail sampling
+
+Traffic IPC exposes decimal counters and monotonic sample/attachment metadata,
+not runtime handles. A mounted visible detail component samples sequentially;
+no overlapping requests, application timer or background history is added.
+Unmount/visibility cleanup stops polling; reconnect/paused baselines are reset.
+Chart memory is capped at 301 points/5 minutes. State history reuses LogBook.

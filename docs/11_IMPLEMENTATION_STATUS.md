@@ -1,6 +1,7 @@
 # Implementation status
 
-Current release: **TunnelWarden 0.2.1 — published and verified**, Windows x64.
+Current candidate: **TunnelWarden 0.2.2**, Windows x64; final release checks in progress.
+Previous release: v0.2.1, published and verified.
 Development branch: `master`. The v0.1 phase history is retained below;
 the v0.2 implementation and publication receipts follow it.
 
@@ -395,3 +396,25 @@ Final combined gates are being run before the GUI phase commit.
 GUI phase gate passed: full fmt/check/test/clippy, 31 unit + 12 real SSH tests,
 3 frontend tests, zero Svelte diagnostics, production build and boundary/vendor
 checks. No new frontend package dependency was introduced.
+
+### v0.2.2 top-tab refinement — passed
+
+The user replaced the long vertical detail layout with Overview / Traffic /
+History tabs. Header/actions/navigation stay fixed; the traffic chart fits the
+available height, exact samples use a dialog, and history uses 10-entry pages.
+Real WebView tests cover clicking tabs, ArrowLeft/Right/Home/End, selected/focus
+semantics, hidden sections, sample dialog and unchanged real forwarding tests.
+Screenshots at 1080x720 and 760x520 inspected. The outer detail page has no
+horizontal/vertical overflow; the traffic tab also fits without scrolling at
+760x520. Axe reports zero violations (SVG contrast manually reviewed).
+Version 0.2.2 and release notes are updated; final rebuild follows the refinement.
+
+### v0.2.2 final candidate gate — passed
+
+Final tabbed source passes 31 Rust unit + 12 SSH integration + 3 frontend tests,
+all Rust/frontend/boundary/vendor gates and locked local NSIS release build.
+Dependency lock changes only the application version; npm ci completed with
+zero vulnerabilities. Prior API and GUI phase CI runs both succeeded.
+API phase: `2bd6d2d6c31fc4b7501dafb4026e1d42de807980`.
+GUI phase: `395f7ecf5048dbd189fb1a559494094401e429da`.
+Publication receipt will follow actual tag workflow and downloaded-asset audit.

@@ -26,6 +26,6 @@ export function linePath(points: TrafficPoint[], direction: keyof Rate, start: n
   return points.map(p => {
     if (!p.rate) { connected = false; return ''; }
     const command = connected ? 'L' : 'M'; connected = true;
-    return `${command}${(60 + (p.at - start) / span * 640).toFixed(2)},${(174 - p.rate[direction] / max * 150).toFixed(2)}`;
+    return `${command}${(90 + (p.at - start) / span * 610).toFixed(2)},${(174 - p.rate[direction] / max * 150).toFixed(2)}`;
   }).join(' ');
 }
