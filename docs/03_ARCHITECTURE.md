@@ -75,6 +75,12 @@ second. Rates use elapsed monotonic time and reset their baseline on reattach.
 Native menu entries retain handles across status updates; configuration changes
 rebuild only the Tunnels children. Every action calls the existing AppService.
 
+Panel theme handling is native shell glue: read the Windows personalization
+preference on creation and WM_SETTINGCHANGE/WM_THEMECHANGED/WM_SYSCOLORCHANGE,
+with high-contrast system colors taking precedence. Per-window GDI brushes live
+until after HWND destruction. No theme watcher thread, WebView or background
+polling is added; a closed panel reads the latest preference when next created.
+
 ## v0.2.2 detail sampling
 
 Traffic IPC exposes decimal counters and monotonic sample/attachment metadata,

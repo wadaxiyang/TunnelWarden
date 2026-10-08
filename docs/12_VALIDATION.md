@@ -136,3 +136,16 @@ NSIS installation/resources/headless-start/uninstall checks passed. All eight
 downloaded assets match GitHub digests and all seven checksum entries; source
 ZIP identifies the exact tag and includes the tabbed details and Oryxis patch.
 Publication time: 2026-10-03T04:46:37Z.
+
+## Native tray theme validation (2026-10-08)
+
+Full scripts/check.ps1 -Frontend passes: 32 Rust unit + 12 real SSH integration
++ 3 frontend tests, fmt/check/clippy, Svelte diagnostics/build, boundary checks
+and exact pinned vendor verification. A real Win32 test injects light/dark/high
+contrast palettes without changing the user's Windows settings, renders parent
+and read-only EDIT into a GDI bitmap and checks background/border pixels and
+text colors. WM_SETTINGCHANGE, WM_THEMECHANGED and WM_SYSCOLORCHANGE reload the
+current preference even when panel text stays unchanged. Scroll position and
+foreground are preserved. Existing hover/debounce/reopen/disposal tests pass.
+This does not claim visual verification on every Windows build or physical
+multi-monitor/high-contrast setup; native scrollbar theme support is best effort.

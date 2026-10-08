@@ -10,9 +10,10 @@ use windows_sys::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        System::LibraryLoader::GetModuleHandleW,
+        System::{LibraryLoader::GetModuleHandleW, Registry::*},
         UI::{
-            Controls::{EM_GETFIRSTVISIBLELINE, EM_LINESCROLL},
+            Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW},
+            Controls::{EM_GETFIRSTVISIBLELINE, EM_LINESCROLL, SetWindowTheme},
             HiDpi::*,
             WindowsAndMessaging::*,
         },
@@ -190,12 +191,191 @@ fn worker(service: Arc<AppService>, rx: mpsc::Receiver<Command>) {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Palette {
+    background: COLORREF,
+    text: COLORREF,
+    border: COLORREF,
+    dark: bool,
+    high_contrast: bool,
+}
+impl Palette {
+    const LIGHT: Self = Self {
+        background: 0x00f9f9f9,
+        text: 0x001b1b1b,
+        border: 0x00d0d0d0,
+        dark: false,
+        high_contrast: false,
+    };
+    const DARK: Self = Self {
+        background: 0x00202020,
+        text: 0x00f3f3f3,
+        border: 0x00454545,
+        dark: true,
+        high_contrast: false,
+    };
+    fn current() -> Self {
+        // This is a shell flyout: prefer Windows (taskbar) mode over app mode.
+        // Missing/older personalization settings fall back to app mode, then light.
+        unsafe {
+            let mut contrast = HIGHCONTRASTW {
+                cbSize: std::mem::size_of::<HIGHCONTRASTW>() as u32,
+                ..std::mem::zeroed()
+            };
+            if SystemParametersInfoW(
+                SPI_GETHIGHCONTRAST,
+                contrast.cbSize,
+                (&mut contrast as *mut HIGHCONTRASTW).cast(),
+                0,
+            ) != 0
+                && contrast.dwFlags & HCF_HIGHCONTRASTON != 0
+            {
+                return Self {
+                    background: GetSysColor(COLOR_WINDOW),
+                    text: GetSysColor(COLOR_WINDOWTEXT),
+                    border: GetSysColor(COLOR_WINDOWFRAME),
+                    high_contrast: true,
+                    ..Self::LIGHT
+                };
+            }
+            for key in [w!("SystemUsesLightTheme"), w!("AppsUseLightTheme")] {
+                let mut light = 1u32;
+                let mut size = std::mem::size_of_val(&light) as u32;
+                if RegGetValueW(
+                    HKEY_CURRENT_USER,
+                    w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                    key,
+                    RRF_RT_REG_DWORD,
+                    std::ptr::null_mut(),
+                    (&mut light as *mut u32).cast(),
+                    &mut size,
+                ) == ERROR_SUCCESS
+                    && light <= 1
+                {
+                    return if light == 0 { Self::DARK } else { Self::LIGHT };
+                }
+            }
+            Self::LIGHT
+        }
+    }
+}
+
+struct PaintState {
+    palette: Palette,
+    background: HBRUSH,
+    border: HBRUSH,
+}
+impl PaintState {
+    fn new(palette: Palette) -> std::io::Result<Self> {
+        let state = Self {
+            palette,
+            background: unsafe { CreateSolidBrush(palette.background) },
+            border: unsafe { CreateSolidBrush(palette.border) },
+        };
+        if state.background.is_null() || state.border.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(state)
+    }
+}
+impl Drop for PaintState {
+    fn drop(&mut self) {
+        unsafe {
+            DeleteObject(self.background);
+            DeleteObject(self.border);
+        }
+    }
+}
+
+// SAFETY: the boxed state outlives HWND, is accessed only on its owner thread,
+// and no borrow into it spans a call that can reenter this window procedure.
+unsafe fn apply_palette(hwnd: HWND, palette: Palette) {
+    unsafe {
+        let state = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PaintState;
+        if state.is_null() {
+            return;
+        }
+        if (*state).palette != palette {
+            let Ok(replacement) = PaintState::new(palette) else {
+                return;
+            };
+            *state = replacement;
+        }
+        let edit = GetWindow(hwnd, GW_CHILD);
+        if !edit.is_null() {
+            // Best effort for native scrollbars; the content palette does not
+            // depend on this Windows theme class being available.
+            let theme = if palette.high_contrast {
+                std::ptr::null()
+            } else if palette.dark {
+                w!("DarkMode_Explorer")
+            } else {
+                w!("Explorer")
+            };
+            SetWindowTheme(edit, theme, std::ptr::null());
+        }
+        RedrawWindow(
+            hwnd,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_FRAME,
+        );
+    }
+}
+
+unsafe extern "system" fn panel_proc(hwnd: HWND, message: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
+    unsafe {
+        if message == WM_NCCREATE {
+            let create = &*(lp as *const CREATESTRUCTW);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, create.lpCreateParams as isize);
+        }
+        let state = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut PaintState;
+        if !state.is_null() {
+            match message {
+                // Read-only EDIT controls request STATIC colors, not EDIT colors.
+                WM_CTLCOLORSTATIC | WM_CTLCOLOREDIT => {
+                    SetTextColor(wp as HDC, (*state).palette.text);
+                    SetBkColor(wp as HDC, (*state).palette.background);
+                    return (*state).background as LRESULT;
+                }
+                WM_ERASEBKGND => return 1, // WM_PAINT fills the entire surface.
+                WM_PAINT | WM_PRINTCLIENT => {
+                    let mut paint: PAINTSTRUCT = std::mem::zeroed();
+                    let dc = if message == WM_PAINT {
+                        BeginPaint(hwnd, &mut paint)
+                    } else {
+                        wp as HDC
+                    };
+                    let mut rect = RECT::default();
+                    GetClientRect(hwnd, &mut rect);
+                    FillRect(dc, &rect, (*state).background);
+                    FrameRect(dc, &rect, (*state).border);
+                    if message == WM_PAINT {
+                        EndPaint(hwnd, &paint);
+                    }
+                    return 0;
+                }
+                WM_SETTINGCHANGE | WM_THEMECHANGED | WM_SYSCOLORCHANGE => {
+                    apply_palette(hwnd, Palette::current());
+                }
+                WM_NCDESTROY => {
+                    SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                }
+                _ => {}
+            }
+        }
+        DefWindowProcW(hwnd, message, wp, lp)
+    }
+}
+
 struct Panel {
     hwnd: HWND,
     edit: HWND,
     font: HFONT,
     bounds: Bounds,
     text: String,
+    // Stable address for GWLP_USERDATA; dropped after DestroyWindow.
+    _paint: Box<PaintState>,
 }
 impl Panel {
     fn new(anchor: Bounds, lines: usize) -> std::io::Result<Self> {
@@ -204,11 +384,10 @@ impl Panel {
         unsafe {
             let instance = GetModuleHandleW(std::ptr::null());
             let class = WNDCLASSW {
-                lpfnWndProc: Some(DefWindowProcW),
+                lpfnWndProc: Some(panel_proc),
                 hInstance: instance,
                 lpszClassName: w!("TunnelWardenTrayStatus"),
                 hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
-                hbrBackground: (COLOR_WINDOW + 1) as HBRUSH,
                 ..std::mem::zeroed()
             };
             RegisterClassW(&class); // Already registered after the first hover is fine.
@@ -243,11 +422,12 @@ impl Panel {
                 scale((24 + lines.min(100) as i32 * 19).clamp(160, 360)),
                 scale(8),
             );
+            let mut paint = Box::new(PaintState::new(Palette::current())?);
             let hwnd = CreateWindowExW(
                 WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
                 class.lpszClassName,
                 w!("TunnelWarden status"),
-                WS_POPUP | WS_BORDER,
+                WS_POPUP | WS_CLIPCHILDREN,
                 bounds.left,
                 bounds.top,
                 bounds.right - bounds.left,
@@ -255,7 +435,7 @@ impl Panel {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 instance,
-                std::ptr::null(),
+                (&mut *paint as *mut PaintState).cast(),
             );
             if hwnd.is_null() {
                 return Err(std::io::Error::last_os_error());
@@ -301,11 +481,13 @@ impl Panel {
                 font,
                 bounds,
                 text: String::new(),
+                _paint: paint,
             };
             if edit.is_null() || font.is_null() {
                 return Err(std::io::Error::last_os_error());
             }
             SendMessageW(edit, WM_SETFONT, font as usize, 1);
+            apply_palette(hwnd, panel._paint.palette);
             Ok(panel)
         }
     }
@@ -354,6 +536,87 @@ impl Drop for Panel {
 mod tests {
     use super::*;
     static NATIVE_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[test]
+    fn native_theme_repaints_background_text_and_border_without_resetting_content() {
+        let _serial = NATIVE_TEST.lock().unwrap();
+        unsafe {
+            let foreground = GetForegroundWindow();
+            let mut panel = Panel::new(Bounds::default(), 100).unwrap();
+            let text = "Tunnel — Running\r\nUpload 12 KiB/s\r\n".repeat(40);
+            panel.update(&text);
+            SendMessageW(panel.edit, EM_LINESCROLL, 0, 12);
+            let line = SendMessageW(panel.edit, EM_GETFIRSTVISIBLELINE, 0, 0);
+            assert!(line > 0);
+            let dc = CreateCompatibleDC(std::ptr::null_mut());
+            let info = BITMAPINFO {
+                bmiHeader: BITMAPINFOHEADER {
+                    biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                    biWidth: 1024,
+                    biHeight: -1024,
+                    biPlanes: 1,
+                    biBitCount: 32,
+                    ..std::mem::zeroed()
+                },
+                ..std::mem::zeroed()
+            };
+            let mut bits = std::ptr::null_mut();
+            let bitmap = CreateDIBSection(
+                dc,
+                &info,
+                DIB_RGB_COLORS,
+                &mut bits,
+                std::ptr::null_mut(),
+                0,
+            );
+            assert!(!bitmap.is_null());
+            let previous = SelectObject(dc, bitmap);
+            // Inject palettes without changing the user's registry or theme.
+            for palette in [
+                Palette::DARK,
+                Palette::LIGHT,
+                Palette {
+                    background: 0,
+                    text: 0x0000ffff,
+                    border: 0x00ffffff,
+                    high_contrast: true,
+                    ..Palette::LIGHT
+                },
+            ] {
+                apply_palette(panel.hwnd, palette);
+                panel.update(&text); // Same text must not prevent theme repaint.
+                SendMessageW(panel.hwnd, WM_PRINTCLIENT, dc as usize, PRF_CLIENT as isize);
+                assert_eq!(GetPixel(dc, 0, 0), palette.border);
+                assert_eq!(GetPixel(dc, 5, 5), palette.background);
+                let brush = SendMessageW(
+                    panel.hwnd,
+                    WM_CTLCOLORSTATIC,
+                    dc as usize,
+                    panel.edit as isize,
+                );
+                assert_ne!(brush, 0);
+                assert_eq!(GetTextColor(dc), palette.text);
+                assert_eq!(GetBkColor(dc), palette.background);
+                // Render the real read-only EDIT to catch default white fills.
+                SendMessageW(panel.edit, WM_PRINTCLIENT, dc as usize, PRF_CLIENT as isize);
+                let mut rect = RECT::default();
+                GetClientRect(panel.edit, &mut rect);
+                assert_eq!(GetPixel(dc, rect.right - 4, 5), palette.background);
+                assert_eq!(SendMessageW(panel.edit, EM_GETFIRSTVISIBLELINE, 0, 0), line);
+                assert_eq!(GetForegroundWindow(), foreground);
+            }
+            // System notifications must reload preferences even with static text.
+            for message in [WM_SETTINGCHANGE, WM_THEMECHANGED, WM_SYSCOLORCHANGE] {
+                apply_palette(panel.hwnd, Palette::DARK);
+                SendMessageW(panel.hwnd, message, 0, 0);
+                assert_eq!(panel._paint.palette, Palette::current());
+                assert_eq!(SendMessageW(panel.edit, EM_GETFIRSTVISIBLELINE, 0, 0), line);
+            }
+            SelectObject(dc, previous);
+            DeleteObject(bitmap);
+            DeleteDC(dc);
+        }
+    }
+
     #[test]
     fn native_panel_is_read_only_nonactivating_scrollable_and_disposable() {
         let _serial = NATIVE_TEST.lock().unwrap();

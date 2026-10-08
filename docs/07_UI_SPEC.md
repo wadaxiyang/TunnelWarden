@@ -118,6 +118,13 @@ Clicking the icon dismisses it; native menus suppress it. Per-monitor work-area
 placement and DPI-scaled Segoe UI keep it readable, with no WebView or focus
 steal. The icon retains its accessible tooltip name when not hovered.
 
+The native panel follows Windows light/dark mode (taskbar/system preference,
+falling back to app preference and then light). Use an opaque surface with
+matching readable text and a subtle border. System theme changes repaint an
+open panel without restarting, resetting scroll or taking focus. Windows high
+contrast overrides this palette with system window/text/frame colors. Native
+scrollbar theming is best effort on Windows versions that support it.
+
 Right click → Tunnels → tunnel name/status → Start or Stop. Connecting and
 Retrying offer Stop; Stopped/Error offer Start. Start-all/Stop-all/Open/Quit
 remain. Manual authentication questions can still open the main interface.

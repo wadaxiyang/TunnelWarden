@@ -449,3 +449,23 @@ Publication receipt will follow actual tag workflow and downloaded-asset audit.
   reachability depends on server/network policy. Encrypted file authentication
   after process restart requires manual unlock or an external agent.
 - This documentation-only receipt leaves the release tag/source unchanged.
+
+### Native tray theme refinement (2026-10-08) — passed locally
+
+- User-requested Windows light/dark integration for the disposable hover panel.
+  Opaque background, readable text and subtle border follow Windows/taskbar mode;
+  app mode is the fallback. High contrast uses Windows system colors.
+- Open panels respond to setting/theme/system-color notifications, including
+  unchanged text. Closed panels read current settings on creation; no additional
+  worker, polling, WebView or persisted preference is introduced.
+- Searched pinned oryxis-core/oryxis-ssh/oryxis-app for Windows personalization,
+  native control color and high-contrast handling before implementation. There
+  is no corresponding native tray implementation to reuse. Changes are Win32
+  presentation glue only; upstream SHA, vendored code and licenses are unchanged.
+- Full local scripts/check.ps1 -Frontend passes: fmt/check/test/clippy, 32 Rust
+  unit + 12 real SSH integration + 3 frontend tests, Svelte check/build and
+  boundary/vendor checks. Real GDI/EDIT tests cover light/dark/high-contrast
+  rendering, system notifications, preserved scroll/focus and window disposal.
+- Native scrollbar theme class support varies by Windows version; content
+  colors do not depend on that best-effort enhancement. No user theme/registry
+  settings were modified by validation. Existing v0.2.2 release/tag unchanged.

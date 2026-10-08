@@ -50,6 +50,9 @@ The explicitly requested v0.2 scope retains every v0.1 acceptance item and adds:
 - Rate sampler uses real elapsed time; restart discards its previous baseline.
 - Native panel hover debounce/cancel/reopen/quit lifecycle; no focus steal;
   read-only Unicode text, scrolling retained during updates, HWND destruction.
+- Native light/dark/high-contrast palettes: actual parent/EDIT background pixels,
+  text colors and border; system notifications refresh an unchanged panel;
+  theme changes preserve scroll and foreground without modifying user settings.
 - Negative monitor coordinates/top-taskbar placement stays in the work area.
 - Native per-tunnel menu labels/action availability follow authoritative states;
   saved changes refresh entries; all actions reuse existing service paths.
