@@ -29,6 +29,7 @@ pub struct RuntimeSnapshot {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
+    pub language: crate::i18n::Language,
     pub auto_reconnect: bool,
     pub launch_at_login: bool,
     pub close_to_tray: bool,
@@ -36,6 +37,7 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            language: crate::i18n::Language::System,
             auto_reconnect: true,
             launch_at_login: false,
             close_to_tray: true,

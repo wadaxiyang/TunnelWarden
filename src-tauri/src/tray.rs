@@ -6,6 +6,7 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
+use tunnelwarden_core::i18n::{Language, text};
 use tunnelwarden_core::{dto::TunnelStatus, service::AppService};
 use uuid::Uuid;
 
@@ -17,6 +18,11 @@ struct RuleMenu {
     stop: MenuItem<tauri::Wry>,
 }
 struct TrayMenus {
+    show: MenuItem<tauri::Wry>,
+    start_all: MenuItem<tauri::Wry>,
+    stop_all: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
+    language: Mutex<Language>,
     tunnels: Submenu<tauri::Wry>,
     rules: Mutex<Vec<RuleMenu>>,
 }
@@ -52,10 +58,31 @@ fn refresh_now(app: &tauri::AppHandle) -> tauri::Result<()> {
         return Ok(());
     };
     let service = app.state::<Arc<AppService>>();
+    let language = service.get_settings().language.resolved();
+    let mut previous = menus.language.lock().unwrap_or_else(|p| p.into_inner());
+    let language_changed = *previous != language;
+    menus.show.set_text(text(language, "Open TunnelWarden"))?;
+    menus
+        .start_all
+        .set_text(text(language, "Start all tunnels"))?;
+    menus
+        .stop_all
+        .set_text(text(language, "Stop all tunnels"))?;
+    menus
+        .quit
+        .set_text(text(language, "Quit and stop tunnels"))?;
+    menus.tunnels.set_text(text(language, "Tunnels"))?;
+    if language_changed {
+        hide_panel(app);
+        if let Some(tray) = app.tray_by_id("tunnelwarden") {
+            tray.set_tooltip(Some(text(language, "TunnelWarden — SSH tunnels")))?;
+        }
+    }
     let tunnels = service.list_tunnels();
     let runtime = service.get_runtime_snapshot();
     let mut rules = menus.rules.lock().unwrap_or_else(|p| p.into_inner());
-    if rules.len() != tunnels.len()
+    if language_changed
+        || rules.len() != tunnels.len()
         || !rules
             .iter()
             .zip(&tunnels)
@@ -68,7 +95,7 @@ fn refresh_now(app: &tauri::AppHandle) -> tauri::Result<()> {
         if tunnels.is_empty() {
             menus.tunnels.append(&MenuItem::new(
                 app,
-                "No tunnels configured",
+                text(language, "No tunnels configured"),
                 false,
                 None::<&str>,
             )?)?;
@@ -109,11 +136,14 @@ fn refresh_now(app: &tauri::AppHandle) -> tauri::Result<()> {
         item.submenu.set_text(format!(
             "{} — {}",
             menu_name(&item.name),
-            status_text(status)
+            status_text(status, language)
         ))?;
+        item.start.set_text(text(language, "Start"))?;
+        item.stop.set_text(text(language, "Stop"))?;
         item.start.set_enabled(!can_stop(status))?;
         item.stop.set_enabled(can_stop(status))?;
     }
+    *previous = language;
     Ok(())
 }
 fn handle_menu(app: &tauri::AppHandle, id: &str) {
@@ -170,6 +200,11 @@ pub fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
         &[&show_item, &tunnels, &start, &stop, &separator, &quit],
     )?;
     app.manage(TrayMenus {
+        show: show_item,
+        start_all: start,
+        stop_all: stop,
+        quit,
+        language: Mutex::new(Language::System),
         tunnels,
         rules: Mutex::new(Vec::new()),
     });
@@ -199,7 +234,8 @@ pub fn install(app: &tauri::AppHandle) -> tauri::Result<()> {
                 }
                 #[cfg(windows)]
                 TrayIconEvent::Leave { .. } => {
-                    let _ = tray.set_tooltip(Some("TunnelWarden — SSH tunnels"));
+                    let language = app.state::<Arc<AppService>>().get_settings().language;
+                    let _ = tray.set_tooltip(Some(text(language, "TunnelWarden — SSH tunnels")));
                     app.state::<crate::tray_panel::TrayPanel>().leave();
                 }
                 _ => {}

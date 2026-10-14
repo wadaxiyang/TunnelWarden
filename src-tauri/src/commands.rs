@@ -9,6 +9,11 @@ use uuid::Uuid;
 type Service<'a> = State<'a, Arc<AppService>>;
 
 #[tauri::command]
+pub fn get_system_language() -> tunnelwarden_core::i18n::Language {
+    tunnelwarden_core::i18n::detect_os_language()
+}
+
+#[tauri::command]
 pub fn list_hosts(service: Service<'_>) -> Result<Vec<HostDto>, String> {
     service.list_hosts()
 }
@@ -100,6 +105,7 @@ pub async fn set_settings(
         rollback.map_err(|r| format!("{e}; restoring launch-at-login failed: {r}"))?;
         return Err(e);
     }
+    crate::tray::refresh(&app);
     Ok(())
 }
 #[tauri::command]
@@ -163,7 +169,10 @@ pub async fn export_error_logs(
     let (tx, rx) = tokio::sync::oneshot::channel();
     app.dialog()
         .file()
-        .add_filter("Diagnostic report", &["json"])
+        .add_filter(
+            tunnelwarden_core::i18n::text(service.get_settings().language, "Diagnostic report"),
+            &["json"],
+        )
         .set_file_name("TunnelWarden-diagnostics.json")
         .save_file(move |path| {
             let _ = tx.send(path);

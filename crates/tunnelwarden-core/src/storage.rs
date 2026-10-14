@@ -96,6 +96,30 @@ impl ConfigStore {
 mod tests {
     use super::*;
     #[test]
+    fn old_settings_follow_system_and_explicit_language_survives_restart() {
+        use crate::i18n::Language;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let mut old = serde_json::to_value(Config::default()).unwrap();
+        old["settings"].as_object_mut().unwrap().remove("language");
+        old["settings"]["auto_reconnect"] = false.into();
+        fs::write(&path, serde_json::to_vec(&old).unwrap()).unwrap();
+        let store = ConfigStore::open(&path).unwrap();
+        assert_eq!(store.snapshot().settings.language, Language::System);
+        for language in [Language::Chinese, Language::English, Language::System] {
+            store
+                .update(|c| {
+                    c.settings.language = language;
+                    Ok(())
+                })
+                .unwrap();
+            let reopened = ConfigStore::open(&path).unwrap().snapshot();
+            assert_eq!(reopened.settings.language, language);
+            assert!(!reopened.settings.auto_reconnect);
+        }
+    }
+
+    #[test]
     fn roundtrip_and_failed_transaction_preserve_config_without_runtime() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");

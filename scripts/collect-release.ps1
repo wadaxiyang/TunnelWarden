@@ -15,7 +15,7 @@ if (Test-Path $dest) { throw 'Smoke-test destination must be new' }
 $nsis = $installers | Where-Object Extension -eq '.exe'
 $install = Start-Process -FilePath $nsis.FullName -ArgumentList @('/S', "/D=$dest") -WindowStyle Hidden -Wait -PassThru
 if ($install.ExitCode -ne 0) { throw "NSIS install exited $($install.ExitCode)" }
-foreach ($name in @('tunnelwarden-tauri.exe', 'LICENSE', 'NOTICE.ORYXIS', 'THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_LICENSES.txt', 'README.md')) {
+foreach ($name in @('tunnelwarden-tauri.exe', 'LICENSE', 'NOTICE.ORYXIS', 'THIRD_PARTY_NOTICES.md', 'THIRD_PARTY_LICENSES.txt', 'README.md', 'README_zh.md')) {
     if (-not (Test-Path (Join-Path $dest $name))) { throw "Missing installed file: $name" }
 }
 $uninstaller = Get-ChildItem $dest -Filter '*uninstall*.exe' | Select-Object -First 1

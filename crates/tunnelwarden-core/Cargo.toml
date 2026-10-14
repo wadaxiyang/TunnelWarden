@@ -1,6 +1,6 @@
 [package]
 name = "tunnelwarden-core"
-version = "0.2.2"
+version = "0.2.3"
 edition.workspace = true
 license.workspace = true
 
@@ -10,6 +10,7 @@ oryxis-ssh.workspace = true
 oryxis-vault.workspace = true
 zeroize = "1"
 regex = "1"
+sys-locale = "0.3"
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true

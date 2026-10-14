@@ -1,16 +1,20 @@
 //! Native tray presentation; no network or forwarding decisions.
 use std::{collections::HashMap, time::Instant};
 use tunnelwarden_core::dto::{RuntimeSnapshot, TunnelDto, TunnelStatus, TunnelTraffic};
+use tunnelwarden_core::i18n::{Language, text};
 use uuid::Uuid;
 
-pub fn status_text(status: TunnelStatus) -> &'static str {
-    match status {
-        TunnelStatus::Stopped => "Stopped",
-        TunnelStatus::Connecting => "Connecting",
-        TunnelStatus::Running => "Running",
-        TunnelStatus::Retrying => "Retrying",
-        TunnelStatus::Error => "Error",
-    }
+pub fn status_text(status: TunnelStatus, language: Language) -> &'static str {
+    text(
+        language,
+        match status {
+            TunnelStatus::Stopped => "Stopped",
+            TunnelStatus::Connecting => "Connecting",
+            TunnelStatus::Running => "Running",
+            TunnelStatus::Retrying => "Retrying",
+            TunnelStatus::Error => "Error",
+        },
+    )
 }
 pub fn can_stop(status: TunnelStatus) -> bool {
     matches!(
@@ -77,42 +81,32 @@ pub fn panel_text(
     tunnels: &[TunnelDto],
     runtime: &RuntimeSnapshot,
     rates: &HashMap<Uuid, (f64, f64)>,
+    language: Language,
 ) -> String {
-    let running = runtime
-        .tunnels
+    let active: Vec<_> = tunnels
         .iter()
-        .filter(|r| r.status == TunnelStatus::Running)
-        .count();
-    let mut text = format!(
-        "TunnelWarden\r\n{running} running / {} saved\r\n\r\n",
-        tunnels.len()
-    );
-    if tunnels.is_empty() {
-        text.push_str("No tunnels configured.\r\nOpen TunnelWarden to add one.\r\n");
+        .filter(|tunnel| {
+            runtime
+                .tunnels
+                .iter()
+                .any(|state| state.id == tunnel.id && state.status == TunnelStatus::Running)
+        })
+        .collect();
+    if active.is_empty() {
+        return format!("TunnelWarden\r\n{}", text(language, "No running tunnels"));
     }
-    for tunnel in tunnels {
-        let state = runtime.tunnels.iter().find(|s| s.id == tunnel.id);
-        let status = state.map(|s| s.status).unwrap_or(TunnelStatus::Stopped);
-        text.push_str(&format!(
-            "{}  —  {}\r\n",
+    let count = text(language, "{count} running").replace("{count}", &active.len().to_string());
+    let mut output = format!("TunnelWarden · {count}\r\n");
+    for tunnel in active {
+        let (up, down) = rates.get(&tunnel.id).copied().unwrap_or_default();
+        output.push_str(&format!(
+            "\r\n{}\r\n  ↑ {}    ↓ {}\r\n",
             name(&tunnel.name),
-            status_text(status)
+            rate(up),
+            rate(down)
         ));
-        if status == TunnelStatus::Running {
-            let (up, down) = rates.get(&tunnel.id).copied().unwrap_or_default();
-            text.push_str(&format!(
-                "  Upload {}    Download {}\r\n",
-                rate(up),
-                rate(down)
-            ));
-        }
-        if let Some(error) = state.and_then(|s| s.last_error.as_deref()) {
-            text.push_str(&format!("  {}\r\n", name(error)));
-        }
-        text.push_str("\r\n");
     }
-    text.push_str("Payload rates · updates every second\r\nUpload = this PC → SSH; download = SSH → this PC\r\nRunning does not verify external reachability.\r\nRight-click the tray icon to control tunnels.");
-    text
+    output.trim_end().to_string()
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -149,6 +143,56 @@ pub fn place(anchor: Bounds, work: Bounds, width: i32, height: i32, gap: i32) ->
 mod tests {
     use super::*;
     use std::time::Duration;
+    #[test]
+    fn compact_panel_only_lists_running_rules_in_both_languages() {
+        use tunnelwarden_core::dto::RuntimeTunnel;
+        let mut tunnels = Vec::new();
+        let mut runtime = RuntimeSnapshot::default();
+        for status in [
+            TunnelStatus::Running,
+            TunnelStatus::Stopped,
+            TunnelStatus::Connecting,
+            TunnelStatus::Retrying,
+            TunnelStatus::Error,
+        ] {
+            let id = Uuid::new_v4();
+            tunnels.push(TunnelDto {
+                id,
+                name: format!("rule-{status:?}"),
+                kind: serde_json::from_value(serde_json::json!("Local")).unwrap(),
+                host_id: Uuid::new_v4(),
+                listen_address: "127.0.0.1".into(),
+                listen_port: 8000,
+                target_host: "localhost".into(),
+                target_port: 80,
+                auto_start: false,
+            });
+            runtime.tunnels.push(RuntimeTunnel {
+                id,
+                status,
+                last_error: Some("hidden diagnostic".into()),
+                next_retry_at: None,
+            });
+        }
+        let rates = HashMap::from([(tunnels[0].id, (1024.0, 2048.0))]);
+        for language in [Language::English, Language::Chinese] {
+            let panel = panel_text(&tunnels, &runtime, &rates, language);
+            assert!(panel.contains("rule-Running"));
+            assert!(panel.contains("↑ 1.0 KiB/s    ↓ 2.0 KiB/s"));
+            assert!(!panel.contains("hidden diagnostic"));
+            for omitted in ["Stopped", "Connecting", "Retrying", "Error"] {
+                assert!(!panel.contains(&format!("rule-{omitted}")));
+            }
+            runtime.tunnels[0].status = TunnelStatus::Stopped;
+            let empty = panel_text(&tunnels, &runtime, &rates, language);
+            assert_eq!(
+                empty,
+                format!("TunnelWarden\r\n{}", text(language, "No running tunnels"))
+            );
+            runtime.tunnels[0].status = TunnelStatus::Running;
+        }
+    }
+
     #[test]
     fn rates_reset_on_reattach_and_use_actual_sample_interval() {
         let now = Instant::now();

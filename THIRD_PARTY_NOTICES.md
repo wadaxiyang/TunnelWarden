@@ -28,6 +28,7 @@ license headers, and modification dates remain beside the adapted source.
 
 | TunnelWarden source | Oryxis source | Adaptation |
 | --- | --- | --- |
+| `crates/tunnelwarden-core/src/i18n.rs` | `crates/oryxis-app/src/i18n/mod.rs` (`detect_os_language`) | Adapted 2026-10-14: retain cached system locale detection; map the primary locale to Chinese or English, persist a system/English/Chinese preference, and share the presentation catalog with Svelte. |
 | `crates/tunnelwarden-core/src/runtime.rs` | `crates/oryxis-app/src/dispatch_port_forwards.rs`, `app.rs`, `boot/mod.rs`, `subscription.rs`, `messages/port_forward.rs` | Adapted 2026-09-29: replace iced tasks with Tokio futures and application DTOs; retain shared connections, start tracking, retry/backoff, liveness, cancellation, and upstream helper tests. Stop IPC awaits pending cancellation; edits withdraw pending host requests. |
 | `crates/tunnelwarden-core/src/dial.rs` | `crates/oryxis-app/src/connect_methods.rs`, `dispatch_port_forwards.rs` | Adapted 2026-09-29 and 2026-09-30: replace vault/group lookups with saved configuration and Windows Credential Manager; bridge host-key prompts, cancellation, connection tests, and in-memory key unlock into the application. |
 | `crates/tunnelwarden-core/src/session_redact.rs` | `crates/oryxis-app/src/session_redact.rs` | Copied 2026-09-30 with upstream regression tests; rustfmt-only logic changes, used for application diagnostics. |

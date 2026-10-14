@@ -142,6 +142,7 @@ pub fn run() {
             commands::get_tunnel_traffic,
             commands::get_logs,
             commands::get_settings,
+            commands::get_system_language,
             commands::save_host,
             commands::delete_host,
             commands::save_tunnel,

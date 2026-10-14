@@ -5,7 +5,7 @@ export interface HostInput { profile: Host; password: string | null; clear_passw
 export interface Tunnel { id: string; name: string; kind: Mode; host_id: string; listen_address: string; listen_port: number; target_host: string; target_port: number; auto_start: boolean }
 export interface RuntimeTunnel { id: string; status: Status; last_error: string | null; next_retry_at: number | null }
 export interface Snapshot { tunnels: RuntimeTunnel[] }
-export interface Settings { auto_reconnect: boolean; launch_at_login: boolean; close_to_tray: boolean }
+export interface Settings { language: import('./i18n').Language; auto_reconnect: boolean; launch_at_login: boolean; close_to_tray: boolean }
 export interface LogEntry { id: string; timestamp: string; level: string; tunnel_id: string | null; message: string }
 export interface HostKeyPrompt { id: string; host_id: string; hostname: string; port: number; key_type: string; fingerprint: string; old_fingerprint: string | null }
 export interface KeyPassphrasePrompt { id: string; host_id: string; host_name: string; identity_file: string; error: string | null }

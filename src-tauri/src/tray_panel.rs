@@ -137,6 +137,7 @@ fn worker(service: Arc<AppService>, rx: mpsc::Receiver<Command>) {
                         &service.list_tunnels(),
                         &service.get_runtime_snapshot(),
                         &Default::default(),
+                        service.get_settings().language,
                     )
                     .lines()
                     .count();
@@ -182,6 +183,7 @@ fn worker(service: Arc<AppService>, rx: mpsc::Receiver<Command>) {
                     &service.list_tunnels(),
                     &service.get_runtime_snapshot(),
                     &rates,
+                    service.get_settings().language,
                 ));
                 sampled = Instant::now();
             }
@@ -418,8 +420,8 @@ impl Panel {
                     right: r.right,
                     bottom: r.bottom,
                 },
-                scale(480),
-                scale((24 + lines.min(100) as i32 * 19).clamp(160, 360)),
+                scale(360),
+                scale((24 + lines.min(100) as i32 * 19).clamp(82, 360)),
                 scale(8),
             );
             let mut paint = Box::new(PaintState::new(Palette::current())?);
@@ -717,9 +719,12 @@ mod tests {
             let edit = GetWindow(hwnd, GW_CHILD);
             let mut text = [0u16; 2048];
             let n = GetWindowTextW(edit, text.as_mut_ptr(), text.len() as i32);
-            assert!(
-                String::from_utf16_lossy(&text[..n as usize]).contains("No tunnels configured")
-            );
+            assert!(String::from_utf16_lossy(&text[..n as usize]).contains(
+                tunnelwarden_core::i18n::text(
+                    service.get_settings().language,
+                    "No running tunnels"
+                )
+            ));
         }
         panel.hide();
         let deadline = Instant::now() + Duration::from_secs(2);

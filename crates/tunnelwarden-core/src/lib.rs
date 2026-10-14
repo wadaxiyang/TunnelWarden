@@ -7,6 +7,7 @@
 pub mod credentials;
 pub mod dial;
 pub mod dto;
+pub mod i18n;
 pub mod logs;
 pub mod runtime;
 pub mod service;
