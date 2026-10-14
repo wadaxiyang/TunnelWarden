@@ -1,160 +1,128 @@
-# TunnelWarden 0.2.2
+<p align="center">
+  <img src="src-tauri/icons/128x128@2x.png" width="128" height="128" alt="TunnelWarden 图标" />
+</p>
 
-## Install and use
+<h1 align="center">TunnelWarden</h1>
 
-Download the Windows x64 NSIS setup EXE or MSI from
-[GitHub Releases](https://github.com/wadaxiyang/TunnelWarden/releases).
-NSIS installs for the current user. The installer downloads Microsoft WebView2
-when absent. This release is unsigned.
+<p align="center">让 SSH 隧道成为随手可用的桌面工具。</p>
 
-1. Add a profile in **SSH Hosts**, including its independent SSH server port.
-   Passwords use Windows Credential Manager; private keys stay in their files.
-   Agent uses external Windows OpenSSH/Pageant-compatible agents via Oryxis.
-   Jump routes list saved hosts in order, nearest hop first.
-   Use **Test connection** to verify the saved SSH route, fingerprint and
-   authentication without creating a tunnel. Tests can be cancelled.
-   Encrypted key files prompt for their passphrase when testing/starting.
-   Oryxis decrypts the key; the passphrase is never saved. The unlocked key is
-   cached only in process memory until quit (including while the UI is closed).
-2. Add a Local, Remote or Dynamic rule in **Tunnels**. Remote exposes a server
-   listener pointing back to a local target; Dynamic exposes a local SOCKS5 port.
-3. Start and verify the first-use fingerprint with the server administrator.
-   Running appears only after backend attachment succeeds. For remote forwards,
-   it does **not** prove external/public reachability: verify the server's actual
-   bind address, SSH forwarding/GatewayPorts policy, firewall/security group,
-   NAT/routing and target service, then connect from a separate external machine.
-4. Stop releases listeners, including remote binds. Edit stops the old rule
-   before saving; Delete cancels before removing configuration.
+<p align="center">
+  保存服务器与转发规则，一键连接本地服务、远程端口和 SOCKS5 代理。<br />
+  自动重连、实时流量与托盘控制，让常用隧道安静地运行在后台。
+</p>
 
-Click a tunnel card to open **Details**, with **Overview / Traffic / History**
-tabs and fixed navigation instead of one long scrolling page. View live upload/download rates, exact
-per-connection byte totals and age, configuration, current error/retry time,
-and a per-tunnel activity history with an errors-only filter. The lightweight
-chart offers 1-minute/5-minute views and an exact recent-samples dialog.
-It collects only while details are visible and clears when leaving the page;
-no traffic history is collected in the background. Reconnects and missing
-samples create gaps. Activity comes from the last 1,000 in-memory app log
-entries and survives closing the UI, but clears when the app process exits.
+<p align="center">
+  <a href="https://github.com/wadaxiyang/TunnelWarden/releases/latest">下载安装</a> ·
+  <a href="#功能">功能</a> ·
+  <a href="#开发">开发</a> ·
+  <a href="https://github.com/wadaxiyang/TunnelWarden/issues">反馈问题</a>
+</p>
 
-Auto-start applies at each application launch. Auto-reconnect uses Oryxis'
-15/30/60/120-second backoff and a 15-second retry tick (an attempt can occur one
-tick later). Manual Stop clears retries for the current run. Unattended starts
-refuse unknown/changed host keys; start manually to inspect and approve them.
+TunnelWarden 是一款开源的 Windows SSH 隧道管理器，使用 **Tauri 2、Svelte 5 与 Rust** 构建，SSH 连接与端口转发由 **Oryxis** 提供。无论是通过跳板机访问内网数据库、将本地服务转发到远程服务器，还是建立临时 SOCKS5 代理，都可以通过图形界面完成配置和管理。
 
-Close **destroys the interface/WebView** when background mode is enabled.
-Only the Rust runtime and tray remain; tunnels keep running. The tray or a
-second launch recreates the interface in the same process. Unsaved drafts get
-a close confirmation. Launch at login starts in the background with no WebView.
-Hover the tray icon for a native text panel showing each tunnel's state and
-upload/download payload rates. It appears after half a second, scrolls for long
-lists, never takes focus, and is destroyed when dismissed. It creates no WebView.
-Rates sample once per second while the panel is visible; the first sample is a
-baseline. Upload means this PC → SSH; download means SSH → this PC, including
-for Remote forwarding. Protocol overhead is excluded and rates reset on reconnect.
-Right-click → **Tunnels → name/status → Start or Stop** controls individual rules.
-Connecting/Retrying can be stopped. Open, Start all, Stop all and Quit remain;
-Quit cancels tunnels before exit. A manual key/fingerprint question still opens
-the main interface when needed.
-Reopening the UI does not restart the app or rerun auto-start.
+## 功能
 
-In **Logs**, use **Export error logs** to save a JSON diagnostic report with
-errors, up to 1,000 recent entries, runtime status, version and upstream SHA.
-This covers the current process session; rotated disk logs remain available
-for earlier sessions. Credentials/key contents are excluded and Oryxis masks
-known secret patterns. Server addresses and error text can remain; review the
-report before sharing.
+- **三种端口转发**：支持本地转发（`-L`）、远程转发（`-R`）与动态 SOCKS5 转发（`-D`），分别配置监听地址、SSH 主机和目标服务。
+- **SSH 主机管理**：保存服务器地址、独立 SSH 端口、用户名与认证方式，支持跳板机和多级跳转，并可在创建隧道前单独测试连接。
+- **多种认证方式**：支持密码、私钥、加密私钥与外部 SSH Agent。密码存入 Windows 凭据管理器；私钥口令不落盘，解锁后的密钥仅缓存在当前进程内存中。
+- **主机指纹确认**：首次连接或指纹发生变化时提示确认。无人值守连接不会自动信任未知或变化的主机密钥。
+- **隧道生命周期管理**：按规则启动、停止、重启，也可批量启停。同一主机的多个转发共享 SSH 连接，停止某条规则不影响其他隧道。
+- **自动启动与断线重连**：可为规则启用应用启动时自动连接，支持断线后的退避重试；手动停止会取消当前重试。
+- **实时流量与状态**：查看上传、下载速率，当前连接的累计流量与持续时间，以及最近 1 分钟或 5 分钟的流量曲线。
+- **活动记录与诊断**：按隧道查看活动历史、筛选错误，并导出 JSON 诊断报告，便于排查连接问题。
+- **托盘与后台运行**：关闭窗口后可继续保持隧道；通过托盘启停规则，悬停查看各隧道状态和流量。支持开机登录时在后台启动，后台模式不保留 WebView 窗口。
 
-## Data and limitations
+## 安装
 
-- Config/trusted fingerprints: `%APPDATA%\dev.tunnelwarden.app\config.json`.
-- Passwords: Windows Credential Manager, service `dev.tunnelwarden.app`.
-- Logs: `%LOCALAPPDATA%\dev.tunnelwarden.app\logs` (1 MB, three archives).
-- Transient runtime state is never persisted. Corrupt/future config fails closed
-  and remains untouched; back up the file before repairing it.
-- After a full app restart, encrypted files need manual unlock before unattended
-  auto-start can authenticate. Use an external SSH agent for unattended unlock.
-- No certificate/interactive OTP UI, terminal, SFTP or built-in agent is included.
-- Remote listeners remain subject to SSH server forwarding/GatewayPorts policy.
-- Windows x64 is the only packaged and validated target for 0.2.2.
+前往 **[GitHub Releases](https://github.com/wadaxiyang/TunnelWarden/releases/latest)** 下载 Windows x64 安装包：
 
-## Build and validate
+| 文件 | 安装方式 |
+| --- | --- |
+| `TunnelWarden_<版本>_x64-setup.exe` | 常规安装，安装到当前用户目录 |
+| `TunnelWarden_<版本>_x64_en-US.msi` | Windows Installer 安装包 |
 
-Windows prerequisites: Rust **1.94.1**, MSVC build tools/Windows SDK, Node.js
-**24**, npm, Python **3.13** and WebView2. The workspace enables aws-lc prebuilt
-NASM objects and UTF-8 C compilation; separate NASM is unnecessary.
+运行安装程序后，打开 TunnelWarden：
+
+1. 在 **SSH Hosts** 中添加服务器，选择认证方式，使用 **Test connection** 检查连接。
+2. 在 **Tunnels** 中新建 Local、Remote 或 Dynamic 规则，填写监听地址与目标地址。
+3. 启动隧道；首次连接时核对服务器指纹，再确认信任。
+
+目前提供 Windows x64 安装包。安装程序会在缺少 Microsoft WebView2 时下载运行时。
+
+使用时请留意：
+
+- 远程转发的外部可访问性取决于 SSH 服务端的转发策略、`GatewayPorts`、防火墙和网络配置。
+- 完全退出应用后，加密私钥需要重新解锁；无人值守启动可配合已解锁的外部 SSH Agent 使用。
+- 流量曲线仅在详情页打开时采样，离开后清空；活动历史属于当前进程会话，退出应用后清空。
+
+## 开发
+
+### 准备环境
+
+当前开发与 CI 以 Windows x64 为目标。请先安装：
+
+- **Git**。
+- **Node.js 24**，包含 npm。
+- **Rust 1.94.1**，使用 MSVC 工具链，并安装 `rustfmt`、`clippy`。
+- **Visual Studio 2022 Build Tools**，勾选“使用 C++ 的桌面开发”及 Windows SDK。
+- **Microsoft Edge WebView2 Runtime**。
+- **Python 3.13**，用于校验 vendored Oryxis 源码与补丁。
+
+### 克隆并运行
 
 ```powershell
+git clone https://github.com/wadaxiyang/TunnelWarden.git
+cd TunnelWarden
+
+rustup toolchain install 1.94.1 --profile minimal --component rustfmt --component clippy
+rustup override set 1.94.1
+
 npm ci
-python -m pip install -r tests/requirements.txt
-./scripts/fetch-oryxis-reference.ps1
 npm run licenses
-./scripts/check.ps1 -Frontend
 npm run tauri -- dev
-# Release:
+```
+
+首次构建会下载 Rust 依赖及锁定版本的 Oryxis 源码。`npm run licenses` 会根据锁文件生成打包所需的 `THIRD_PARTY_LICENSES.txt`，依赖发生变化后应重新生成。
+
+### 检查与构建
+
+```powershell
+# Rust 格式、编译、单元测试、Clippy、源码边界与上游补丁校验，以及前端检查和构建
+./scripts/check.ps1 -Frontend
+
+# 构建 Windows EXE / MSI 安装包
 npm run bundle
 ```
 
-Tests use temporary loopback AsyncSSH servers and fresh keys. The Windows agent
-test uses a disposable pipe and russh's public server API; production auth uses
-Oryxis exclusively. Tests never modify the user's agent. The UI smoke suite uses
-a real isolated Tauri WebView; see `docs/12_VALIDATION.md`.
+安装包输出到 `target/release/bundle/nsis/` 和 `target/release/bundle/msi/`。
 
-CI runs all Rust/frontend gates on Windows. Tag releases repeat the gates, build
-both installers and verify NSIS installation/uninstallation on an ephemeral
-runner before publishing installers, source, notices and SHA-256 checksums.
+### 项目结构
 
-Licensed **AGPL-3.0-or-later**. Source and lockfiles accompany the release; the
-pinned upstream is available at
-[Oryxis](https://github.com/wilsonglasser/oryxis/tree/16ad2af83b424780ff60b6420a6c20a3b30c7143).
-`npm run licenses` collects dependency notices into `THIRD_PARTY_LICENSES.txt`,
-which is included in installers and release assets. Preserve LICENSE,
-NOTICE.ORYXIS and modification notices when redistributing.
+```text
+src/                         Svelte 界面与 TypeScript
+src-tauri/                   Tauri 命令、事件、托盘与桌面集成
+crates/tunnelwarden-core/    隧道运行时、配置、凭据与应用逻辑
+vendor/oryxis-ssh/           锁定版本的 SSH 引擎与流量统计补丁
+upstream/                   Oryxis 应用层参考源码及补丁记录
+scripts/                    构建检查、许可证收集与发布工具
+```
 
-TunnelWarden is a small desktop SSH port-forward manager built around **Oryxis' existing SSH implementation**, not a new SSH implementation.
+SSH、认证和转发逻辑优先复用 Oryxis。修改相关代码前，请阅读 [AGENTS.md](AGENTS.md) 与 [第三方来源说明](THIRD_PARTY_NOTICES.md)；如需重新获取上游应用层参考文件，可运行 `./scripts/fetch-oryxis-reference.ps1`。
 
-## Non-negotiable implementation strategy
+## 致谢
 
-1. **`oryxis-core`, `oryxis-ssh` and the key-import API of `oryxis-vault` are upstream dependencies**, pinned to Oryxis commit `16ad2af83b424780ff60b6420a6c20a3b30c7143`.
-2. Standalone port-forward runtime behavior is **ported from Oryxis `oryxis-app`**, especially `dispatch_port_forwards.rs`.
-3. If Oryxis already implements a required SSH / forwarding / retry behavior, **copy or call it; do not redesign it**.
-4. TunnelWarden-owned Rust code should mostly be adapters: persistence, Tauri commands/events, runtime registry integration, and application-specific DTOs.
-The complete pinned SSH crate is vendored with a small, audited passive payload
-counter patch; it does not change the SSH/forwarding/retry control flow. See
-`vendor/oryxis-ssh/PROVENANCE.md` and `upstream/oryxis-ssh-traffic.patch`.
-`python scripts/verify-vendor.py` checks every file against the exact upstream.
+TunnelWarden 建立在这些开源项目的工作之上：
 
-5. The GUI is new: **Tauri 2 + Svelte 5 + TypeScript**. Do not copy Oryxis' iced UI.
+- **[Oryxis](https://github.com/wilsonglasser/oryxis)** — 感谢 Wilson Glasser 及贡献者。TunnelWarden 复用了其 SSH 引擎、认证、跳板路由、端口转发与密钥导入能力，并改编了独立转发运行时及日志脱敏逻辑，是本项目最重要的上游。
+- **[russh](https://github.com/Eugeny/russh)** — Oryxis 使用的 Rust SSH 实现。
+- **[Tauri](https://github.com/tauri-apps/tauri)** — 桌面应用框架与系统集成。
+- **[Svelte](https://github.com/sveltejs/svelte)**、**[Vite](https://github.com/vitejs/vite)** 与 **[TypeScript](https://github.com/microsoft/TypeScript)** — 界面开发与前端工具链。
+- **[Tokio](https://github.com/tokio-rs/tokio)** — Rust 异步运行时。
 
-## Target scope
+也感谢所有间接依赖的维护者与贡献者。完整依赖许可证由 `npm run licenses` 收集，并随安装包分发。
 
-- Saved SSH hosts
-- Local forwarding (`-L`)
-- Remote forwarding (`-R`)
-- Dynamic SOCKS forwarding (`-D`)
-- Jump hosts / jump chains through Oryxis
-- Password / private-key / ssh-agent auth through Oryxis
-- Start / stop / restart
-- Auto-start
-- Auto-reconnect using Oryxis' standalone-forward retry semantics
-- Shared PTY-less SSH connection for multiple forwards to the same host, as Oryxis already does
-- Logs
-- Tray and launch-at-login
-- Small, precise configuration UI
+## 许可证
 
-## Start here
+TunnelWarden 采用 **[GNU AGPL-3.0-or-later](LICENSE)** 许可证。
 
-Read in this order:
-
-1. `AGENTS.md`
-2. `docs/00_PROJECT_CHARTER.md`
-3. `docs/01_UPSTREAM_AND_LICENSE.md`
-4. `docs/02_COPY_MAP.md`
-5. `docs/03_ARCHITECTURE.md`
-6. `docs/04_DEVELOPMENT_BOUNDARIES.md`
-7. `docs/05_IMPLEMENTATION_PHASES.md`
-8. `docs/06_TAURI_API_CONTRACT.md`
-9. `docs/07_UI_SPEC.md`
-10. `docs/08_ACCEPTANCE_MATRIX.md`
-11. `docs/09_ASTRA_EXECUTION.md`
-
-Run `scripts/fetch-oryxis-reference.ps1` on Windows or `scripts/fetch-oryxis-reference.sh` on Unix before implementation. It materializes the exact upstream source files referenced by the migration plan.
+Oryxis 固定于提交 [`16ad2af8`](https://github.com/wilsonglasser/oryxis/tree/16ad2af83b424780ff60b6420a6c20a3b30c7143)。上游版权、改编来源和 SSH 补丁说明见 [NOTICE.ORYXIS](NOTICE.ORYXIS)、[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) 与 [PROVENANCE.md](vendor/oryxis-ssh/PROVENANCE.md)。

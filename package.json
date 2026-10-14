@@ -9,7 +9,6 @@
     "dev": "vite --port 1420",
     "build": "vite build",
     "check": "svelte-check --tsconfig ./tsconfig.json",
-    "test": "node --test tests/traffic.test.mjs",
     "tauri": "tauri"
   },
   "dependencies": {

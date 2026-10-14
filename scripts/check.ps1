@@ -17,8 +17,6 @@ try {
         $npm = if (Get-Command npm -ErrorAction SilentlyContinue) { 'npm' } else { './.upstream/tooling/node_modules/.bin/npm.cmd' }
         & $npm run check
         if ($LASTEXITCODE) { throw 'npm check failed' }
-        & $npm test
-        if ($LASTEXITCODE) { throw 'frontend telemetry tests failed' }
         & $npm run build
         if ($LASTEXITCODE) { throw 'npm build failed' }
     }

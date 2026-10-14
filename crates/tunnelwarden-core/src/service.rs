@@ -1,6 +1,6 @@
 //! Tauri-facing application methods. Owns DTO conversion/validation and CRUD,
 //! not SSH semantics. Searched Oryxis forms/dispatch/connect_methods before
-//! implementing these application-specific adapters (see docs/02_COPY_MAP.md).
+//! implementing these application-specific adapters (see THIRD_PARTY_NOTICES.md).
 use crate::{
     credentials::SecretStore,
     dial::{ApplicationDialer, PromptBroker},

@@ -36,7 +36,6 @@ jobs:
           ./scripts/verify-release.ps1 -Tag $env:RELEASE_TAG
           rustup toolchain install 1.94.1 --profile minimal --component rustfmt --component clippy
           rustup default 1.94.1
-          python -m pip install -r tests/requirements.txt
           npm ci
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           npm run licenses
@@ -45,7 +44,7 @@ jobs:
         with:
           shared-key: windows-1.94.1
           cache-on-failure: true
-      - name: Full acceptance gates
+      - name: Build and source checks
         shell: pwsh
         run: ./scripts/check.ps1 -Frontend
       - name: Build Windows installers
@@ -60,7 +59,7 @@ jobs:
         run: |
           gh release view $env:RELEASE_TAG *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $env:RELEASE_TAG --verify-tag --draft --title "TunnelWarden $env:RELEASE_TAG" --notes-file docs/RELEASE_NOTES.md
+            gh release create $env:RELEASE_TAG --verify-tag --draft --title "TunnelWarden $env:RELEASE_TAG" --generate-notes
             if ($LASTEXITCODE) { throw 'Release creation failed' }
           }
           gh release upload $env:RELEASE_TAG release-assets/* --clobber

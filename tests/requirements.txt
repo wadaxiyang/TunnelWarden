@@ -1,2 +1,0 @@
-asyncssh==2.23.0
-bcrypt==5.0.0

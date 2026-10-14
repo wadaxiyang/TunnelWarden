@@ -33,7 +33,7 @@ When copying Oryxis code into TunnelWarden:
 - add a short modification notice with the TunnelWarden modification date when code is changed;
 - record the upstream path and pinned SHA in a nearby comment when practical;
 - keep `LICENSE`, `NOTICE.ORYXIS`, and `THIRD_PARTY_NOTICES.md` intact;
-- update `docs/02_COPY_MAP.md` if a new upstream source file is copied.
+- update `THIRD_PARTY_NOTICES.md` with the source path, pinned SHA, and adaptation summary if a new upstream source file is copied.
 
 ## Architectural boundaries
 
@@ -79,4 +79,6 @@ Do not proceed past a failing stage by masking or deleting tests.
 
 ## Scope discipline
 
-First release is a tunnel manager, not a terminal emulator, SFTP client, remote desktop client, proxy suite, cloud manager, or generic agent framework. Features outside `docs/00_PROJECT_CHARTER.md` require an explicit scope change.
+The product scope is saved SSH hosts, local/remote/dynamic forwarding, jump chains, password/key/agent authentication, per-rule and batch controls, auto-start/reconnect, shared host connections, traffic visibility, logs, tray controls, and launch at login.
+
+First release is a tunnel manager, not a terminal emulator, SFTP client, remote desktop client, proxy suite, cloud manager, or generic agent framework. Features outside this scope require an explicit scope change.
